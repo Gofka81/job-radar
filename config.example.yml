@@ -1,0 +1,79 @@
+# Copy to config.yml and edit. config.yml is gitignored.
+
+# --- Title filter ---
+# A title passes if >=1 positive matches AND 0 negatives match (case-insensitive substring).
+title_filter:
+  positive:
+    - "Data Engineer"
+    - "Analytics Engineer"
+    - "Data Platform"
+    - "PySpark"
+    - "Spark"
+    - "Databricks"
+    - "Snowflake"
+    - "Delta Lake"
+    - "Airflow"
+    - "ETL"
+    - "ELT"
+    - "Data Pipeline"
+    - "Lakehouse"
+  negative:
+    # Trim seniority you don't want + stacks you don't work in
+    - "Junior"
+    - "Intern"
+    - "Graduate"
+    - "Principal"
+    - "Head of"
+    - "Director"
+    - "Manager"          # remove if you want lead/management roles
+    - ".NET"
+    - "PHP"
+    - "Salesforce"
+
+# --- Location filter ---
+# block wins over allow. Empty job location passes (don't penalise missing data).
+location_filter:
+  allow:
+    - "Edinburgh"
+    - "Glasgow"
+    - "Scotland"
+    - "Remote"
+    - "United Kingdom"
+    - "UK"
+  block: []
+  # Note: a "London (Remote)" role passes via "Remote"; pure on-site London with no
+  # remote tag won't match allow unless "London" is added. Tune to taste.
+
+# --- Sources ---
+sources:
+  adzuna:
+    enabled: true
+    country: gb
+    queries: ["data engineer", "analytics engineer", "databricks"]
+    where: "Edinburgh"        # anchor for distance search; "" for nationwide
+    distance: 60              # km radius around `where`
+    max_days_old: 14
+    max_pages: 5
+    results_per_page: 50
+
+  reed:
+    enabled: true
+    queries: ["data engineer", "analytics engineer"]
+    location: "Edinburgh"     # "" for nationwide
+    distance: 40              # miles (Reed uses miles)
+    results_to_take: 100
+
+  # ATS boards take a list of company slugs (the bit after the ATS domain).
+  # CURATE THESE — verify each slug resolves (200, not 404). Examples below are
+  # illustrative; replace with UK data-heavy employers you care about.
+  greenhouse:
+    enabled: false
+    companies: []             # e.g. "monzo", "wise", "deliveroo"  ← verify slugs
+
+  lever:
+    enabled: false
+    companies: []             # e.g. "spotify"  ← verify slugs
+
+  ashby:
+    enabled: false
+    companies: []             # ← verify slugs

@@ -1,0 +1,46 @@
+name: job-radar
+
+# Pi deployment: one image, three services.
+#   server      always-on FastAPI (cloudflared points here over the compose net)
+#   scan        supercronic, runs `job-scan` on the docker/crontab schedule
+#   cloudflared exposes `server` publicly via your Cloudflare Tunnel
+#
+# Both server and scan share the DuckDB on the `jobs-data` volume. DuckDB is
+# single-writer across processes; Store retries on lock so the brief daily-scan
+# overlap waits instead of erroring.
+#
+# Setup:  cp config.example.yml config.yml ; cp .env.example .env  (fill both)
+# Run:    docker compose up -d --build
+
+x-app: &app
+  build: .
+  image: job-radar:latest
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - jobs-data:/app/data
+    - ./config.yml:/app/config.yml:ro
+
+services:
+  server:
+    <<: *app
+    # Not published to the host: cloudflared reaches it at http://server:8000
+    # over the internal network. Add `ports: ["8000:8000"]` only for LAN debug.
+    expose:
+      - "8000"
+
+  scan:
+    <<: *app
+    command: ["supercronic", "/app/crontab"]
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - server
+
+volumes:
+  jobs-data:

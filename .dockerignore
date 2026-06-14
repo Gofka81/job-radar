@@ -1,0 +1,16 @@
+# Trim the build context. The Dockerfile only COPYs pyproject.toml, README.md,
+# src/, and docker/crontab — everything else here just keeps the context small.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+data
+*.duckdb
+*.duckdb.wal
+.env
+config.yml
