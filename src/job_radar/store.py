@@ -7,41 +7,12 @@ from pathlib import Path
 
 import duckdb
 
+from .locations import clean_location
 from .schema import Job
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    job_id      VARCHAR PRIMARY KEY,
-    source      VARCHAR,
-    company     VARCHAR,
-    title       VARCHAR,
-    url         VARCHAR,
-    location    VARCHAR,
-    posted_at   DATE,
-    salary_min  DOUBLE,
-    salary_max  DOUBLE,
-    currency    VARCHAR,
-    remote      BOOLEAN,
-    status      VARCHAR DEFAULT 'new',
-    score       DOUBLE,
-    report_num  INTEGER,
-    first_seen  TIMESTAMP,
-    last_seen   TIMESTAMP,
-    raw         JSON
-);
-CREATE TABLE IF NOT EXISTS scan_runs (
-    run_id       VARCHAR,
-    started_at   TIMESTAMP,
-    finished_at  TIMESTAMP,
-    source       VARCHAR,
-    found        INTEGER,
-    new          INTEGER,
-    dupes        INTEGER,
-    filtered     INTEGER,
-    errors       INTEGER,
-    error_detail VARCHAR
-);
-"""
+# SQL schema lives as ordered, idempotent migration files (migrations/*.sql),
+# applied in name order on every open.
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 def _now() -> datetime:
@@ -55,7 +26,13 @@ class Store:
         # (e.g. a dashboard hit during the daily scan) can hit a lock. Wait and
         # retry rather than error — the scan only holds the file for seconds.
         self.con = self._connect(path, retries, retry_delay)
-        self.con.execute(SCHEMA)
+        self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """Run migrations/*.sql in name order. Every statement is idempotent
+        (CREATE/ALTER ... IF NOT EXISTS), so re-running on each open is a no-op."""
+        for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            self.con.execute(sql_file.read_text())
 
     @staticmethod
     def _connect(path: str | Path, retries: int, retry_delay: float):
@@ -86,17 +63,31 @@ class Store:
             return False
         self.con.execute(
             """INSERT INTO jobs
-               (job_id, source, company, title, url, location, posted_at,
+               (job_id, source, company, title, url, location, location_cleaned, posted_at,
                 salary_min, salary_max, currency, remote, status,
                 first_seen, last_seen, raw)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
             [
                 job.job_id, job.source, job.company, job.title, job.url, job.location,
-                job.posted_at, job.salary_min, job.salary_max, job.currency, job.remote,
-                now, now, json.dumps(job.raw, default=str),
+                clean_location(job.location), job.posted_at, job.salary_min, job.salary_max,
+                job.currency, job.remote, now, now, json.dumps(job.raw, default=str),
             ],
         )
         return True
+
+    def backfill_location_cleaned(self) -> int:
+        """Catch up rows that predate the column (existing prod data). Idempotent:
+        once everything's filled, the NULL query matches nothing and it's a no-op.
+        Returns rows updated."""
+        rows = self.con.execute(
+            "SELECT job_id, location FROM jobs WHERE location_cleaned IS NULL"
+        ).fetchall()
+        for job_id, location in rows:
+            self.con.execute(
+                "UPDATE jobs SET location_cleaned = ? WHERE job_id = ?",
+                [clean_location(location), job_id],
+            )
+        return len(rows)
 
     # --- API sync (Pi <-> PC) ---------------------------------------------
     # A job is "pending" (needs evaluation) while status='new'. Verdicts from
@@ -142,7 +133,7 @@ class Store:
         return updated
 
     LIST_COLS = (
-        "job_id", "source", "company", "title", "url", "location",
+        "job_id", "source", "company", "title", "url", "location", "location_cleaned",
         "status", "score", "first_seen", "last_seen",
     )
 

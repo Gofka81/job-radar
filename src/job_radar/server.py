@@ -115,6 +115,15 @@ def create_app(db_path: str | None = None) -> FastAPI:
     def funnel(_: None = Depends(require_token), store: Store = Depends(get_store)) -> dict:
         return store.funnel()
 
+    @app.get("/api/jobs")
+    def jobs(
+        limit: int = 500,
+        _: None = Depends(require_token),
+        store: Store = Depends(get_store),
+    ) -> dict:
+        """All jobs with timestamps + status, newest-discovered first."""
+        return {"jobs": store.list_jobs(limit)}
+
     @app.get("/api/config", response_class=PlainTextResponse)
     def get_config(_: None = Depends(require_token)) -> str:
         """Current config.yml (or the example if none saved yet) — for the editor."""

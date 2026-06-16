@@ -70,6 +70,13 @@ def test_list_jobs_includes_timestamps(tmp_path):
     assert set(jobs[0]) >= {"first_seen", "last_seen", "status", "score", "url"}
 
 
+def test_upsert_computes_location_cleaned(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(_job("https://x/1", location="Sutton, London"))
+    assert s.list_jobs()[0]["location_cleaned"] == "London"
+    assert s.backfill_location_cleaned() == 0  # already filled at insert → no-op
+
+
 def test_prune_deletes_stale_new_job(tmp_path):
     s = _store(tmp_path)
     job = _job("https://x/1")

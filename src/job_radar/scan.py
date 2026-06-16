@@ -49,7 +49,10 @@ def run_scan(
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         s = Store(db_path)
         seen = s.seen_ids()
+        filled = s.backfill_location_cleaned()  # catch up old rows; no-op once done
         s.close()
+        if filled:
+            log(f"  ⌖ backfilled location_cleaned for {filled} row(s)")
     else:
         seen = set()
 
