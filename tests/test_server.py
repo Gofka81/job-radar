@@ -18,6 +18,7 @@ def client(tmp_path, monkeypatch):
     s.upsert(job)
     s.close()
     monkeypatch.setenv(TOKEN_ENV, TOKEN)
+    monkeypatch.setenv("JOB_RADAR_CONFIG", str(tmp_path / "config.yml"))  # never touch real config
     c = TestClient(create_app(str(db)))
     c.headers.update({"authorization": f"Bearer {TOKEN}"})
     return c, job.job_id
@@ -63,3 +64,76 @@ def test_fails_closed_without_server_token(tmp_path, monkeypatch):
     c = TestClient(create_app(str(tmp_path / "n.duckdb")))
     # No token configured server-side => refuse rather than serve open.
     assert c.get("/api/pending", headers={"authorization": "Bearer anything"}).status_code == 503
+
+
+# --- config endpoint ---
+
+def test_get_config_returns_yaml(client):
+    c, _ = client
+    r = c.get("/api/config")
+    assert r.status_code == 200
+    assert "title_filter" in r.text  # example fallback (no saved config yet)
+
+
+def test_post_config_saves_and_reloads(client):
+    c, _ = client
+    body = "title_filter:\n  positive:\n    - Spark\nsources:\n  reed:\n    enabled: true\n"
+    r = c.post("/api/config", content=body, headers={"content-type": "text/plain"})
+    assert r.status_code == 200 and r.json() == {"saved": True, "sources": ["reed"]}
+    assert "Spark" in c.get("/api/config").text
+
+
+def test_post_config_rejects_bad_yaml(client):
+    c, _ = client
+    r = c.post("/api/config", content="foo: [1, 2", headers={"content-type": "text/plain"})
+    assert r.status_code == 400
+
+
+# --- scan endpoint ---
+
+def test_scan_requires_token(client):
+    c, _ = client
+    assert c.post("/api/scan", headers={"authorization": "x"}).status_code == 401
+    assert c.get("/api/scan", headers={"authorization": "x"}).status_code == 401
+
+
+def test_scan_now_triggers_run(client, monkeypatch):
+    import time
+    import job_radar.server as srv
+
+    calls = []
+    monkeypatch.setattr(srv, "run_scan", lambda cfg, db, **k: calls.append(db) or {"totals": {"found": 1}})
+    c, _ = client
+    r = c.post("/api/scan")
+    assert r.status_code == 202 and r.json() == {"started": True}
+    for _ in range(100):  # wait for the background thread
+        if calls:
+            break
+        time.sleep(0.02)
+    assert calls, "run_scan was not invoked"
+    assert c.get("/api/scan").json()["last"]["totals"]["found"] == 1
+
+
+def test_scan_409_when_already_running(client):
+    import job_radar.server as srv
+
+    c, _ = client
+    srv._scan_lock.acquire()
+    try:
+        assert c.post("/api/scan").status_code == 409
+    finally:
+        srv._scan_lock.release()
+
+
+def test_guarded_scan_single_flight(monkeypatch, tmp_path):
+    import job_radar.server as srv
+
+    monkeypatch.setenv("JOB_RADAR_CONFIG", str(tmp_path / "c.yml"))
+    called = []
+    monkeypatch.setattr(srv, "run_scan", lambda *a, **k: called.append(1) or {})
+    srv._scan_lock.acquire()  # simulate a scan in progress
+    try:
+        srv._guarded_scan("db")  # must no-op, not block
+    finally:
+        srv._scan_lock.release()
+    assert called == []

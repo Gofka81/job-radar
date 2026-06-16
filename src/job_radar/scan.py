@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import ROOT, load_config
 from .filters import build_location_filter, build_title_filter
+from .schema import Job
 from .sources import REGISTRY
 from .sources.base import client
 from .store import Store
@@ -22,51 +23,57 @@ def _load_env() -> None:
         pass  # dotenv optional; fall back to process env
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
-        prog="job-scan", description="Deterministic UK job discovery (zero LLM tokens)."
-    )
-    ap.add_argument("--config", default=None, help="path to config.yml")
-    ap.add_argument("--db", default=str(ROOT / "data" / "jobs.duckdb"), help="DuckDB path")
-    ap.add_argument("--source", default=None, help="run a single source by id")
-    ap.add_argument("--dry-run", action="store_true", help="fetch + filter, write nothing")
-    args = ap.parse_args(argv)
-
-    _load_env()
-    cfg = load_config(args.config)
+def run_scan(
+    cfg: dict,
+    db_path: str | Path | None,
+    *,
+    only_source: str | None = None,
+    dry_run: bool = False,
+    log=lambda _msg: None,
+) -> dict:
+    """Run the discovery scan once and return a summary. Shared by the CLI and
+    the server's /api/scan. The DB is opened/closed per source so the write lock
+    is held only during the quick upsert bursts, not during slow HTTP fetches —
+    keeping the dashboard responsive while a scan runs."""
     title_ok = build_title_filter(cfg.get("title_filter", {}))
     loc_ok = build_location_filter(cfg.get("location_filter"))
     sources_cfg = cfg.get("sources", {})
 
-    store: Store | None = None
-    if not args.dry_run:
-        Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-        store = Store(args.db)
-    seen = store.seen_ids() if store else set()
+    if not dry_run:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        s = Store(db_path)
+        seen = s.seen_ids()
+        s.close()
+    else:
+        seen = set()
 
     http = client()
     totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0}
-    new_jobs = []
+    new_jobs: list[Job] = []
+    started = datetime.now(timezone.utc)
 
     for sid, mod in REGISTRY.items():
         scfg = sources_cfg.get(sid, {})
         if not scfg.get("enabled", False):
             continue
-        if args.source and sid != args.source:
+        if only_source and sid != only_source:
             continue
 
         run_id = uuid.uuid4().hex[:12]
-        started = datetime.now(timezone.utc)
+        src_started = datetime.now(timezone.utc)
         try:
-            jobs = mod.fetch(scfg, http)
-        except Exception as exc:  # connector errors must not kill the whole scan
-            print(f"  ✗ {sid}: {exc}", file=sys.stderr)
+            jobs = mod.fetch(scfg, http)  # slow network work — no DB held here
+        except Exception as exc:  # one bad connector must not kill the scan
+            log(f"  ✗ {sid}: {exc}")
             totals["errors"] += 1
-            if store:
-                store.record_run(run_id, started, sid, 0, 0, 0, 0, 1, str(exc))
+            if not dry_run:
+                s = Store(db_path)
+                s.record_run(run_id, src_started, sid, 0, 0, 0, 0, 1, str(exc))
+                s.close()
             continue
 
         found = new = dupes = filtered = 0
+        store = Store(db_path) if not dry_run else None
         for job in jobs:
             found += 1
             if not title_ok(job.title) or not loc_ok(job.location):
@@ -81,33 +88,58 @@ def main(argv: list[str] | None = None) -> int:
                 new += 1
             elif store is None:
                 new += 1
+        if store:
+            store.record_run(run_id, src_started, sid, found, new, dupes, filtered, 0)
+            store.close()
 
         for k, v in (("found", found), ("new", new), ("dupes", dupes), ("filtered", filtered)):
             totals[k] += v
-        if store:
-            store.record_run(run_id, started, sid, found, new, dupes, filtered, 0)
-        print(f"  ✓ {sid}: {found} found, {new} new, {dupes} dupes, {filtered} filtered")
+        log(f"  ✓ {sid}: {found} found, {new} new, {dupes} dupes, {filtered} filtered")
 
     http.close()
+    return {
+        "started": started.isoformat(),
+        "finished": datetime.now(timezone.utc).isoformat(),
+        "totals": totals,
+        "new_jobs": [
+            {"source": j.source, "company": j.company, "title": j.title,
+             "location": j.location, "url": j.url}
+            for j in new_jobs
+        ],
+    }
 
-    date = datetime.now(timezone.utc).date().isoformat()
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="job-scan", description="Deterministic UK job discovery (zero LLM tokens)."
+    )
+    ap.add_argument("--config", default=None, help="path to config.yml")
+    ap.add_argument("--db", default=str(ROOT / "data" / "jobs.duckdb"), help="DuckDB path")
+    ap.add_argument("--source", default=None, help="run a single source by id")
+    ap.add_argument("--dry-run", action="store_true", help="fetch + filter, write nothing")
+    args = ap.parse_args(argv)
+
+    _load_env()
+    cfg = load_config(args.config)
+    result = run_scan(
+        cfg, args.db, only_source=args.source, dry_run=args.dry_run,
+        log=lambda m: print(m),
+    )
+
+    t = result["totals"]
     bar = "━" * 45
+    date = datetime.now(timezone.utc).date().isoformat()
     print(f"\n{bar}\nJob Scan — {date}\n{bar}")
-    print(f"Found:    {totals['found']}")
-    print(f"New:      {totals['new']}")
-    print(f"Dupes:    {totals['dupes']}")
-    print(f"Filtered: {totals['filtered']}")
-    print(f"Errors:   {totals['errors']}")
-    if new_jobs:
+    for k in ("found", "new", "dupes", "filtered", "errors"):
+        print(f"{k.capitalize()+':':9} {t[k]}")
+    if result["new_jobs"]:
         print("\nNew matches:")
-        for j in new_jobs:
-            print(f"  + {j.company} | {j.title} | {j.location or 'N/A'}")
+        for j in result["new_jobs"]:
+            print(f"  + {j['company']} | {j['title']} | {j['location'] or 'N/A'}")
     if args.dry_run:
         print("\n(dry run — nothing written)")
-    elif store:
+    else:
         print(f"\nSaved to {args.db}")
-        store.close()
-
     return 0
 
 

@@ -1,46 +1,37 @@
 name: job-radar
 
-# Pi deployment: one image, three services.
-#   server      always-on FastAPI (cloudflared points here over the compose net)
-#   scan        supercronic, runs `job-scan` on the docker/crontab schedule
-#   cloudflared exposes `server` publicly via your Cloudflare Tunnel
+# Pi deployment via Portainer GitOps: point a stack at the PUBLIC repo, redeploy
+# on push. Single service — the FastAPI server, which serves the dashboard/API
+# AND owns scanning (APScheduler on SCAN_HOURS + on-demand POST /api/scan). It is
+# the sole DB writer.
 #
-# Both server and scan share the DuckDB on the `jobs-data` volume. DuckDB is
-# single-writer across processes; Store retries on lock so the brief daily-scan
-# overlap waits instead of erroring.
+# NOTHING PERSONAL IN GIT:
+#   - Secrets are Portainer stack environment variables (the ${...} below).
+#   - config.yml is written via POST /api/config and lives on the jobs-data
+#     volume — edit it from the dashboard, no redeploy.
 #
-# Setup:  cp config.example.yml config.yml ; cp .env.example .env  (fill both)
-# Run:    docker compose up -d --build
-
-x-app: &app
-  build: .
-  image: job-radar:latest
-  env_file: .env
-  restart: unless-stopped
-  volumes:
-    - jobs-data:/app/data
-    - ./config.yml:/app/config.yml:ro
+# Your existing cloudflared (managed separately) points its public hostname at
+# this server. The port is published on the host so the tunnel can reach it;
+# narrow to 127.0.0.1 if cloudflared runs on the same host.
+#
+# Local dev:  ADZUNA_APP_ID=... JOB_RADAR_API_TOKEN=... docker compose up --build
 
 services:
   server:
-    <<: *app
-    # Not published to the host: cloudflared reaches it at http://server:8000
-    # over the internal network. Add `ports: ["8000:8000"]` only for LAN debug.
-    expose:
-      - "8000"
-
-  scan:
-    <<: *app
-    command: ["supercronic", "/app/crontab"]
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
+    build: .
+    image: job-radar:latest
     restart: unless-stopped
-    command: tunnel run
     environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    depends_on:
-      - server
+      - ADZUNA_APP_ID=${ADZUNA_APP_ID:-}
+      - ADZUNA_APP_KEY=${ADZUNA_APP_KEY:-}
+      - REED_API_KEY=${REED_API_KEY:-}
+      - JOB_RADAR_API_TOKEN=${JOB_RADAR_API_TOKEN}
+      - SCAN_HOURS=${SCAN_HOURS:-7-19/2}
+      - TZ=${TZ:-Europe/London}
+    volumes:
+      - jobs-data:/app/data        # DuckDB + live config.yml
+    ports:
+      - "${JOB_RADAR_PORT:-8000}:8000"
 
 volumes:
   jobs-data:

@@ -1,6 +1,0 @@
-# supercronic crontab — standard 5-field cron. Times are the container's TZ
-# (set TZ in .env if you want local time). Edit the schedule to taste.
-#
-#  ┌ min  ┌ hour  ┌ dom  ┌ mon  ┌ dow
-#  │      │       │      │      │
-   0      7-19/2  *      *      *   job-scan   # every 2h, 07:00–19:00 (7×/day)
