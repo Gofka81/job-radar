@@ -10,9 +10,9 @@ name: job-radar
 #   - config.yml is written via POST /api/config and lives on the jobs-data
 #     volume — edit it from the dashboard, no redeploy.
 #
-# Your existing cloudflared (managed separately) points its public hostname at
-# this server. The port is published on the host so the tunnel can reach it;
-# narrow to 127.0.0.1 if cloudflared runs on the same host.
+# The port is published on the host so your own reverse proxy / tunnel / ingress
+# (managed separately) can route to it. Narrow to 127.0.0.1 if that runs on the
+# same host.
 #
 # Local dev:  ADZUNA_APP_ID=... JOB_RADAR_API_TOKEN=... docker compose up --build
 
@@ -31,7 +31,7 @@ services:
     volumes:
       - jobs-data:/app/data        # DuckDB + live config.yml
     ports:
-      - "${JOB_RADAR_PORT:-8000}:8000"
+      - "${JOB_RADAR_PORT:-8088}:8000"
 
 volumes:
   jobs-data:
