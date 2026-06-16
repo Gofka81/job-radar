@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import setup_logging
 from .config import ROOT, load_config
+
+logger = logging.getLogger("job_radar.scan")
 from .filters import build_location_filter, build_title_filter
 from .schema import Job
 from .sources import REGISTRY
@@ -29,12 +32,15 @@ def run_scan(
     *,
     only_source: str | None = None,
     dry_run: bool = False,
-    log=lambda _msg: None,
+    log=None,
 ) -> dict:
     """Run the discovery scan once and return a summary. Shared by the CLI and
     the server's /api/scan. The DB is opened/closed per source so the write lock
     is held only during the quick upsert bursts, not during slow HTTP fetches —
     keeping the dashboard responsive while a scan runs."""
+    if log is None:
+        log = logger.info
+    log("scan started")
     title_ok = build_title_filter(cfg.get("title_filter", {}))
     loc_ok = build_location_filter(cfg.get("location_filter"))
     sources_cfg = cfg.get("sources", {})
@@ -109,6 +115,11 @@ def run_scan(
         if totals["pruned"]:
             log(f"  ⌫ pruned {totals['pruned']} stale job(s)")
 
+    log(
+        f"scan complete — found {totals['found']}, new {totals['new']}, "
+        f"merged {totals['dupes']}, filtered {totals['filtered']}, "
+        f"pruned {totals['pruned']}, errors {totals['errors']}"
+    )
     return {
         "started": started.isoformat(),
         "finished": datetime.now(timezone.utc).isoformat(),
@@ -131,12 +142,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="fetch + filter, write nothing")
     args = ap.parse_args(argv)
 
+    setup_logging()
     _load_env()
     cfg = load_config(args.config)
-    result = run_scan(
-        cfg, args.db, only_source=args.source, dry_run=args.dry_run,
-        log=lambda m: print(m),
-    )
+    result = run_scan(cfg, args.db, only_source=args.source, dry_run=args.dry_run)
 
     t = result["totals"]
     bar = "━" * 45

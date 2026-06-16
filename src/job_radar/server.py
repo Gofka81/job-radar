@@ -11,6 +11,7 @@ The Pi is the only writer of the DB; the PC only reads pending + posts verdicts.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 
@@ -18,11 +19,12 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from . import bot, notify
+from . import bot, notify, setup_logging
 from .config import ROOT, load_config, read_config_text, save_config
 from .scan import run_scan
 from .store import Store
 
+logger = logging.getLogger("job_radar.server")
 DEFAULT_DB = str(ROOT / "data" / "jobs.duckdb")
 TOKEN_ENV = "JOB_RADAR_API_TOKEN"
 
@@ -178,7 +180,7 @@ def _start_scheduler(db: str) -> None:
     sched = BackgroundScheduler()
     sched.add_job(lambda: _guarded_scan(db), CronTrigger(hour=hours, minute=0))
     sched.start()
-    print(f"[scheduler] scans at hour={hours} (TZ={os.environ.get('TZ', 'local')})", flush=True)
+    logger.info("scheduler started — scans at hour=%s (TZ=%s)", hours, os.environ.get("TZ", "local"))
 
 
 def _setup_telegram() -> None:
@@ -194,19 +196,21 @@ def _setup_telegram() -> None:
     _WEBHOOK["secret"] = secret
     url = base.rstrip("/") + "/telegram/webhook"
     ok = notify.set_webhook(url, secret)
-    print(f"[telegram] webhook -> {url} ({'registered' if ok else 'FAILED'})", flush=True)
+    logger.info("telegram webhook -> %s (%s)", url, "registered" if ok else "FAILED")
 
 
 def main() -> int:
     import uvicorn
 
+    setup_logging()
     db = os.environ.get("JOB_RADAR_DB") or DEFAULT_DB
     if os.environ.get("SCAN_SCHEDULER", "1") != "0":
         _start_scheduler(db)
     _setup_telegram()
     host = os.environ.get("JOB_RADAR_HOST", "127.0.0.1")
     port = int(os.environ.get("JOB_RADAR_PORT", "8000"))
-    uvicorn.run("job_radar.server:app", host=host, port=port, reload=False)
+    # log_config=None → uvicorn's own logs flow through our timestamped root logger
+    uvicorn.run("job_radar.server:app", host=host, port=port, reload=False, log_config=None)
     return 0
 
 
