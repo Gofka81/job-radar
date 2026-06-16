@@ -19,7 +19,6 @@ name: job-radar
 services:
   server:
     build: .
-    image: job-radar:latest
     container_name: job-radar-server
     restart: unless-stopped
     environment:
