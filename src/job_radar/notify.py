@@ -79,13 +79,19 @@ def job_line(j: dict) -> str:
 
 
 def notify_new_jobs(result: dict) -> None:
-    """Push the new matches from a scan result (run_scan() output)."""
-    new = result.get("new_jobs") or []
+    """Push the new matches from a scan result (run_scan() output). Uses
+    `notify_jobs` — the fingerprint-deduped subset (one ping per distinct role,
+    not per reposted ad-id) — falling back to `new_jobs` for older callers."""
+    new = result.get("notify_jobs")
+    if new is None:
+        new = result.get("new_jobs") or []
     to = chat_id()
     if not new or not to:
         return
     lines = [f"🆕 <b>{len(new)}</b> new job match(es):", ""]
     lines += [job_line(j) for j in new[:MAX_LISTED]]
     if len(new) > MAX_LISTED:
-        lines.append(f"…and {len(new) - MAX_LISTED} more")
+        # No pagination here — the push is fire-and-forget; /jobs is the paginated
+        # browser for the full active list.
+        lines.append(f"…and {len(new) - MAX_LISTED} more — send /jobs to browse all")
     send_message(to, "\n".join(lines))

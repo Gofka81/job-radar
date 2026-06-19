@@ -73,8 +73,31 @@ def test_list_jobs_includes_timestamps(tmp_path):
 def test_upsert_computes_location_cleaned(tmp_path):
     s = _store(tmp_path)
     s.upsert(_job("https://x/1", location="Sutton, London"))
-    assert s.list_jobs()[0]["location_cleaned"] == "London"
-    assert s.backfill_location_cleaned() == 0  # already filled at insert → no-op
+    assert s.list_jobs()[0]["location_cleaned"] == "London"  # computed at insert
+
+
+def test_upsert_dedups_tracking_token_variants(tmp_path):
+    s = _store(tmp_path)
+    base = "https://www.adzuna.co.uk/jobs/land/ad/5760606708"
+    j1 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer", url=base + "?se=AAA&v=1")
+    j2 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer", url=base + "?se=BBB&v=2")
+    assert s.upsert(j1) is True
+    assert s.upsert(j2) is False  # same canonical URL → same job_id → merged, not a phantom row
+    assert len(s.list_jobs()) == 1
+    assert s.list_jobs()[0]["url"] == base + "?se=AAA&v=1"  # original (first-seen) URL kept, tokens intact
+
+
+def test_seen_fingerprints_computed_on_the_fly(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(Job(source="adzuna", company="Harnham", title="Data Engineer",
+                 url="https://www.adzuna.co.uk/jobs/land/ad/1?se=x"))
+    assert s.seen_fingerprints() == {"harnham|data engineer"}
+
+
+def test_seen_fingerprints_skips_blank(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(Job(source="reed", company="", title="Data Engineer", url="https://x/1"))
+    assert s.seen_fingerprints() == set()  # blank company → no safe fingerprint
 
 
 def test_prune_deletes_stale_new_job(tmp_path):

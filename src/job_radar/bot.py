@@ -13,7 +13,7 @@ from collections.abc import Callable
 from . import notify
 from .store import Store
 
-PAGE_SIZE = 5
+PAGE_SIZE = 10
 
 
 def _allowed(user_id) -> bool:

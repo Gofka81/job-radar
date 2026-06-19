@@ -6,11 +6,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .dedup import canonical_url
+
 
 def make_job_id(source: str, url: str) -> str:
-    """Stable 16-char id from source + url. Same posting from the same source
-    always hashes the same, which is what dedup keys on."""
-    return hashlib.sha1(f"{source}:{url}".encode()).hexdigest()[:16]
+    """Stable 16-char id from source + canonical url. The url is canonicalised
+    (query string stripped) so the same Adzuna ad arriving under a fresh tracking
+    token (`?se=`, `?utm_*`) hashes to the same id and collapses onto one row,
+    instead of becoming a phantom duplicate. The stored `url` keeps its tokens."""
+    return hashlib.sha1(f"{source}:{canonical_url(url)}".encode()).hexdigest()[:16]
 
 
 class Job(BaseModel):

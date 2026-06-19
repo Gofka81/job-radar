@@ -10,6 +10,7 @@ from . import setup_logging
 from .config import ROOT, load_config
 
 logger = logging.getLogger("job_radar.scan")
+from .dedup import fingerprint
 from .filters import build_location_filter, build_title_filter
 from .schema import Job
 from .sources import REGISTRY
@@ -48,17 +49,17 @@ def run_scan(
     if not dry_run:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         s = Store(db_path)
-        seen = s.seen_ids()
-        filled = s.backfill_location_cleaned()  # catch up old rows; no-op once done
+        seen = s.seen_ids()               # storage dedup (canonical-URL job_ids)
+        seen_fps = s.seen_fingerprints()  # notification dedup (content fingerprints)
         s.close()
-        if filled:
-            log(f"  ⌖ backfilled location_cleaned for {filled} row(s)")
     else:
         seen = set()
+        seen_fps = set()
 
     http = client()
-    totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0, "pruned": 0}
+    totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0, "pruned": 0, "notify": 0}
     new_jobs: list[Job] = []
+    notify_jobs: list[Job] = []  # fingerprint-new subset → what we actually ping about
     live_sources: list[str] = []  # sources that fetched OK this run (safe to prune)
     started = datetime.now(timezone.utc)
 
@@ -90,11 +91,20 @@ def run_scan(
             if not title_ok(job.title) or not loc_ok(job.location):
                 filtered += 1
                 continue
-            if job.job_id in seen:
+            if job.job_id in seen:  # same ad (canonical URL) already stored — merge, don't re-add
                 dupes += 1
                 continue
             seen.add(job.job_id)
             new_jobs.append(job)
+            # Notify once per distinct role: a fingerprint-new job is a genuinely
+            # new posting; reposts of an already-seen role (new ad-id, same
+            # company+title) are stored but suppressed from the ping. fp=None
+            # (blank company/title) can't be deduped safely → always notify.
+            fp = fingerprint(job.company, job.title)
+            if fp is None or fp not in seen_fps:
+                if fp is not None:
+                    seen_fps.add(fp)
+                notify_jobs.append(job)
             if store and store.upsert(job):
                 new += 1
             elif store is None:
@@ -108,6 +118,7 @@ def run_scan(
         log(f"  ✓ {sid}: {found} found, {new} new, {dupes} dupes, {filtered} filtered")
 
     http.close()
+    totals["notify"] = len(notify_jobs)
 
     # Prune jobs that dropped off their (successfully-scanned) source > N hours
     # ago — closed/filled postings that would otherwise inflate the store.
@@ -120,18 +131,23 @@ def run_scan(
 
     log(
         f"scan complete — found {totals['found']}, new {totals['new']}, "
-        f"merged {totals['dupes']}, filtered {totals['filtered']}, "
-        f"pruned {totals['pruned']}, errors {totals['errors']}"
+        f"notify {totals['notify']}, merged {totals['dupes']}, "
+        f"filtered {totals['filtered']}, pruned {totals['pruned']}, "
+        f"errors {totals['errors']}"
     )
+
+    def _summ(j: Job) -> dict:
+        return {"source": j.source, "company": j.company, "title": j.title,
+                "location": j.location, "url": j.url}
+
     return {
         "started": started.isoformat(),
         "finished": datetime.now(timezone.utc).isoformat(),
         "totals": totals,
-        "new_jobs": [
-            {"source": j.source, "company": j.company, "title": j.title,
-             "location": j.location, "url": j.url}
-            for j in new_jobs
-        ],
+        # new_jobs = URL-new (storage/dashboard view); notify_jobs = the
+        # fingerprint-new subset we actually ping about (one per distinct role).
+        "new_jobs": [_summ(j) for j in new_jobs],
+        "notify_jobs": [_summ(j) for j in notify_jobs],
     }
 
 
@@ -154,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     bar = "━" * 45
     date = datetime.now(timezone.utc).date().isoformat()
     print(f"\n{bar}\nJob Scan — {date}\n{bar}")
-    for k in ("found", "new", "dupes", "filtered", "errors", "pruned"):
+    for k in ("found", "new", "notify", "dupes", "filtered", "errors", "pruned"):
         print(f"{k.capitalize()+':':9} {t[k]}")
     if result["new_jobs"]:
         print("\nNew matches:")

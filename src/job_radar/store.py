@@ -7,12 +7,47 @@ from pathlib import Path
 
 import duckdb
 
+from .dedup import fingerprint
 from .locations import clean_location
 from .schema import Job
 
-# SQL schema lives as ordered, idempotent migration files (migrations/*.sql),
-# applied in name order on every open.
-MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+# Single-table schema, created on open. No migration framework: this is a
+# development project that re-scrapes freely, so we evolve the schema by editing
+# this DDL and re-running scans rather than carrying ordered migrations + backfills.
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id           VARCHAR PRIMARY KEY,   -- sha1(source : canonical_url)
+    source           VARCHAR,
+    company          VARCHAR,
+    title            VARCHAR,
+    url              VARCHAR,               -- original (tokens intact, clickable)
+    location         VARCHAR,
+    location_cleaned VARCHAR,               -- canonical UK city (locations.py)
+    posted_at        DATE,
+    salary_min       DOUBLE,
+    salary_max       DOUBLE,
+    currency         VARCHAR,
+    remote           BOOLEAN,
+    status           VARCHAR DEFAULT 'new',
+    score            DOUBLE,
+    report_num       INTEGER,
+    first_seen       TIMESTAMP,
+    last_seen        TIMESTAMP,
+    raw              JSON
+);
+CREATE TABLE IF NOT EXISTS scan_runs (
+    run_id       VARCHAR,
+    started_at   TIMESTAMP,
+    finished_at  TIMESTAMP,
+    source       VARCHAR,
+    found        INTEGER,
+    new          INTEGER,
+    dupes        INTEGER,
+    filtered     INTEGER,
+    errors       INTEGER,
+    error_detail VARCHAR
+);
+"""
 
 
 def _now() -> datetime:
@@ -21,18 +56,14 @@ def _now() -> datetime:
 
 class Store:
     def __init__(self, path: str | Path, *, retries: int = 20, retry_delay: float = 0.5):
-        # DuckDB allows only one read-write process per file. The Pi runs the
-        # server and the scheduled scan as separate processes, so a brief overlap
-        # (e.g. a dashboard hit during the daily scan) can hit a lock. Wait and
-        # retry rather than error — the scan only holds the file for seconds.
+        # DuckDB allows only one read-write connection to a file at a time. The
+        # server opens a short-lived connection per request (~5ms; fine at our
+        # traffic — see the connection-strategy note in the README/PLAN), and the
+        # in-process scan opens its own while writing. A brief overlap (a dashboard
+        # hit mid-scan) can hit the lock, so wait and retry rather than error — the
+        # scan holds the file only for seconds.
         self.con = self._connect(path, retries, retry_delay)
-        self._apply_migrations()
-
-    def _apply_migrations(self) -> None:
-        """Run migrations/*.sql in name order. Every statement is idempotent
-        (CREATE/ALTER ... IF NOT EXISTS), so re-running on each open is a no-op."""
-        for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            self.con.execute(sql_file.read_text())
+        self.con.execute(SCHEMA)  # idempotent (IF NOT EXISTS)
 
     @staticmethod
     def _connect(path: str | Path, retries: int, retry_delay: float):
@@ -47,11 +78,24 @@ class Store:
         raise last  # type: ignore[misc]
 
     def seen_ids(self) -> set[str]:
+        """job_ids already on file. A scan skips any job whose job_id is here.
+        Since job_id = sha1(source:canonical_url), tracking-token variants of the
+        same ad share an id and are collapsed automatically."""
         return {row[0] for row in self.con.execute("SELECT job_id FROM jobs").fetchall()}
 
+    def seen_fingerprints(self) -> set[str]:
+        """Content fingerprints already on file, computed on the fly from
+        company+title (blanks dropped). A scan notifies only for jobs whose
+        fingerprint is NOT here — suppressing agency reposts of a role we've
+        already pinged about (same role, brand-new ad-id)."""
+        rows = self.con.execute("SELECT company, title FROM jobs").fetchall()
+        return {fp for c, t in rows if (fp := fingerprint(c, t)) is not None}
+
     def upsert(self, job: Job) -> bool:
-        """Insert a new job; if it already exists just bump last_seen.
-        Returns True if the row was newly inserted."""
+        """Insert a new job; if it already exists just bump last_seen. Returns
+        True if the row was newly inserted. job_id is canonical-URL based, so the
+        same Adzuna ad arriving under a fresh tracking token resolves to the same
+        id and is recognised as a duplicate instead of inserted as a phantom."""
         now = _now()
         exists = self.con.execute(
             "SELECT 1 FROM jobs WHERE job_id = ?", [job.job_id]
@@ -75,20 +119,6 @@ class Store:
         )
         return True
 
-    def backfill_location_cleaned(self) -> int:
-        """Catch up rows that predate the column (existing prod data). Idempotent:
-        once everything's filled, the NULL query matches nothing and it's a no-op.
-        Returns rows updated."""
-        rows = self.con.execute(
-            "SELECT job_id, location FROM jobs WHERE location_cleaned IS NULL"
-        ).fetchall()
-        for job_id, location in rows:
-            self.con.execute(
-                "UPDATE jobs SET location_cleaned = ? WHERE job_id = ?",
-                [clean_location(location), job_id],
-            )
-        return len(rows)
-
     # --- API sync (Pi <-> PC) ---------------------------------------------
     # A job is "pending" (needs evaluation) while status='new'. Verdicts from
     # the PC move it to evaluated/applied/rejected/archived and drop it off the
@@ -99,8 +129,9 @@ class Store:
     )
 
     def pending_jobs(self) -> list[dict]:
-        """Jobs still awaiting evaluation (status='new'), newest first.
-        This is the Pi -> PC shortlist payload."""
+        """Jobs still awaiting evaluation (status='new'), newest first. This is
+        the Pi -> PC shortlist payload. No phantom dedup needed — job_id is
+        canonical-URL based, so each ad is already a single row."""
         rows = self.con.execute(
             f"""SELECT {", ".join(self.PENDING_COLS)}
                 FROM jobs WHERE status = 'new'
@@ -134,7 +165,7 @@ class Store:
 
     LIST_COLS = (
         "job_id", "source", "company", "title", "url", "location", "location_cleaned",
-        "status", "score", "first_seen", "last_seen",
+        "status", "score", "salary_min", "salary_max", "currency", "first_seen", "last_seen",
     )
 
     def list_jobs(self, limit: int = 500) -> list[dict]:

@@ -13,8 +13,8 @@ ME = "12345"
 def db(tmp_path):
     p = str(tmp_path / "b.duckdb")
     s = Store(p)
-    for i in range(7):  # 7 jobs → 2 pages at PAGE_SIZE 5
-        s.upsert(Job(source="reed", company=f"Co{i}", title="Data Engineer", url=f"https://x/{i}"))
+    for i in range(12):  # 12 jobs → 2 pages at PAGE_SIZE 10
+        s.upsert(Job(source="reed", company=f"Co{i}", title=f"Data Engineer {i}", url=f"https://x/{i}"))
     s.close()
     return p
 
@@ -42,7 +42,7 @@ def test_jobs_first_page(db, sent):
     bot.handle_update(_msg("/jobs"), db)
     assert len(sent["send"]) == 1
     _, text, markup = sent["send"][0]
-    assert "Active jobs" in text and "(7)" in text and "page 1/2" in text
+    assert "Active jobs" in text and "(12)" in text and "page 1/2" in text
     btns = markup["inline_keyboard"][0]
     assert [b["callback_data"] for b in btns] == ["jobs:1"]  # Next only on page 1
 

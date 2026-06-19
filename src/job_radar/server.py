@@ -16,10 +16,11 @@ import os
 import threading
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import bot, notify, setup_logging
+from .dashboard import DASHBOARD_HTML
 from .config import ROOT, load_config, read_config_text, save_config
 from .scan import run_scan
 from .store import Store
@@ -93,6 +94,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
             yield store
         finally:
             store.close()
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard() -> str:
+        """The phone-friendly dashboard shell. Loads open (no token needed for the
+        HTML itself); the page then prompts for the API token and calls the
+        bearer-gated /api/* endpoints with it."""
+        return DASHBOARD_HTML
 
     @app.get("/healthz")
     def healthz() -> dict:

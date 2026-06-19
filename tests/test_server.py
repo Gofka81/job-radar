@@ -29,6 +29,20 @@ def test_healthz_is_open(tmp_path):
     assert c.get("/healthz").json() == {"ok": True}
 
 
+def test_dashboard_served_open_at_root(tmp_path):
+    c = TestClient(create_app(str(tmp_path / "h.duckdb")))
+    r = c.get("/")  # HTML shell loads without a token
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "job-radar" in r.text
+
+
+def test_jobs_endpoint_includes_salary(client):
+    c, _ = client
+    jobs = c.get("/api/jobs").json()["jobs"]
+    assert set(jobs[0]) >= {"salary_min", "salary_max", "currency"}
+
+
 def test_pending_requires_token(client):
     c, _ = client
     assert c.get("/api/pending", headers={"authorization": "Bearer wrong"}).status_code == 401
