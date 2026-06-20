@@ -15,14 +15,15 @@ def _store(tmp_path):
     return Store(tmp_path / "t.duckdb")
 
 
-def _job(url: str, **kw) -> Job:
-    return Job(source="reed", company="Test", title="Data Engineer", url=url, **kw)
+def _job(url: str, *, title: str = "Data Engineer", **kw) -> Job:
+    return Job(source="reed", company="Test", title=title, url=url, **kw)
 
 
 def test_pending_lists_new_jobs_newest_first(tmp_path):
     s = _store(tmp_path)
-    assert s.upsert(_job("https://x/1"))
-    assert s.upsert(_job("https://x/2"))
+    # distinct titles → distinct vacancies (same title would dedup to one row)
+    assert s.upsert(_job("https://x/1", title="Data Engineer"))
+    assert s.upsert(_job("https://x/2", title="Analytics Engineer"))
     pending = s.pending_jobs()
     assert {p["url"] for p in pending} == {"https://x/1", "https://x/2"}
     assert set(pending[0].keys()) >= {"job_id", "url", "company", "title", "location"}
@@ -70,64 +71,89 @@ def test_list_jobs_includes_timestamps(tmp_path):
     assert set(jobs[0]) >= {"first_seen", "last_seen", "status", "score", "url"}
 
 
+def test_list_jobs_q_searches_description(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(Job(source="reed", company="Acme", title="Data Engineer", url="https://x/1",
+                 description="You will build pipelines with Apache Spark and Airflow."))
+    s.upsert(Job(source="reed", company="Beta", title="Data Engineer", url="https://x/2",
+                 location="Glasgow", description="Snowflake and dbt shop, no big-data stack."))
+    # "spark" is only in the JD of job 1, not in any title → still found
+    spark = s.list_jobs(q="spark")
+    assert [j["url"] for j in spark] == ["https://x/1"]
+    # matches title/company too, case-insensitive
+    assert len(s.list_jobs(q="DATA ENGINEER")) == 2
+    assert [j["url"] for j in s.list_jobs(q="snowflake")] == ["https://x/2"]
+    # description is searched but not shipped in the payload
+    assert "description" not in spark[0]
+
+
 def test_upsert_computes_location_cleaned(tmp_path):
     s = _store(tmp_path)
     s.upsert(_job("https://x/1", location="Sutton, London"))
     assert s.list_jobs()[0]["location_cleaned"] == "London"  # computed at insert
 
 
-def test_upsert_dedups_tracking_token_variants(tmp_path):
+def test_upsert_dedups_reposts_of_same_vacancy(tmp_path):
     s = _store(tmp_path)
-    base = "https://www.adzuna.co.uk/jobs/land/ad/5760606708"
-    j1 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer", url=base + "?se=AAA&v=1")
-    j2 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer", url=base + "?se=BBB&v=2")
+    # same role+city via different ad-ids/locations → one vacancy, one row
+    j1 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer",
+             url="https://x/57013787", location="London")
+    j2 = Job(source="adzuna", company="Harnham", title="Senior Analytics Engineer",
+             url="https://x/57026970", location="London, UK")
     assert s.upsert(j1) is True
-    assert s.upsert(j2) is False  # same canonical URL → same job_id → merged, not a phantom row
+    assert s.upsert(j2) is False  # same role+city (London) → same job_id → merged
     assert len(s.list_jobs()) == 1
-    assert s.list_jobs()[0]["url"] == base + "?se=AAA&v=1"  # original (first-seen) URL kept, tokens intact
+    assert s.list_jobs()[0]["url"] == "https://x/57013787"  # first-seen URL kept
 
 
-def test_seen_fingerprints_computed_on_the_fly(tmp_path):
+def test_upsert_keeps_same_role_in_different_city(tmp_path):
     s = _store(tmp_path)
-    s.upsert(Job(source="adzuna", company="Harnham", title="Data Engineer",
-                 url="https://www.adzuna.co.uk/jobs/land/ad/1?se=x"))
-    assert s.seen_fingerprints() == {"harnham|data engineer"}
+    s.upsert(Job(source="adzuna", company="BigCorp", title="Data Engineer", url="https://x/1", location="London"))
+    s.upsert(Job(source="adzuna", company="BigCorp", title="Data Engineer", url="https://x/2", location="Edinburgh"))
+    assert len(s.list_jobs()) == 2  # different city → distinct vacancies, not lost
 
 
-def test_seen_fingerprints_skips_blank(tmp_path):
-    s = _store(tmp_path)
-    s.upsert(Job(source="reed", company="", title="Data Engineer", url="https://x/1"))
-    assert s.seen_fingerprints() == set()  # blank company → no safe fingerprint
-
-
-def test_prune_deletes_stale_new_job(tmp_path):
+def test_expire_marks_stale_new_job(tmp_path):
     s = _store(tmp_path)
     job = _job("https://x/1")
     s.upsert(job)
     _backdate(s, job.job_id, 100)  # last seen 100h ago
-    assert s.prune_stale(72, ["reed"]) == 1
-    assert s.list_jobs() == []
+    assert s.expire_stale(24, ["reed"]) == 1
+    assert s.list_jobs()[0]["status"] == "expired"  # marked, not deleted (row kept)
+    assert s.pending_jobs() == []                   # dropped off the active feed
 
 
-def test_prune_keeps_recent_job(tmp_path):
+def test_expire_keeps_recent_job(tmp_path):
     s = _store(tmp_path)
     s.upsert(_job("https://x/1"))  # last_seen = now
-    assert s.prune_stale(72, ["reed"]) == 0
+    assert s.expire_stale(24, ["reed"]) == 0
 
 
-def test_prune_keeps_evaluated_history(tmp_path):
+def test_expire_keeps_human_verdict_history(tmp_path):
     s = _store(tmp_path)
     job = _job("https://x/1")
     s.upsert(job)
     s.mark_results([{"job_id": job.job_id, "status": "applied"}])
     _backdate(s, job.job_id, 100)
-    assert s.prune_stale(72, ["reed"]) == 0  # applied = history, never pruned
+    assert s.expire_stale(24, ["reed"]) == 0  # applied = history, never expired
 
 
-def test_prune_skips_sources_not_scanned(tmp_path):
+def test_expire_skips_sources_not_scanned(tmp_path):
     s = _store(tmp_path)
     job = _job("https://x/1")  # source = reed
     s.upsert(job)
     _backdate(s, job.job_id, 100)
-    assert s.prune_stale(72, ["adzuna"]) == 0  # reed didn't scan OK → don't touch
-    assert s.prune_stale(72, ["reed"]) == 1
+    assert s.expire_stale(24, ["adzuna"]) == 0  # reed didn't scan OK → don't touch
+    assert s.expire_stale(24, ["reed"]) == 1
+
+
+def test_expired_job_reactivates_when_relisted(tmp_path):
+    s = _store(tmp_path)
+    job = _job("https://x/1")
+    s.upsert(job)
+    _backdate(s, job.job_id, 100)
+    s.expire_stale(24, ["reed"])
+    assert s.list_jobs()[0]["status"] == "expired"
+    s.upsert(job)  # seen again in a later scan → reactivate
+    assert s.list_jobs()[0]["status"] == "new"
+    assert len(s.list_jobs()) == 1  # reactivated in place, not duplicated

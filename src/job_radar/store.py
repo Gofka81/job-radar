@@ -7,7 +7,6 @@ from pathlib import Path
 
 import duckdb
 
-from .dedup import fingerprint
 from .locations import clean_location
 from .schema import Job
 
@@ -23,6 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     url              VARCHAR,               -- original (tokens intact, clickable)
     location         VARCHAR,
     location_cleaned VARCHAR,               -- canonical UK city (locations.py)
+    description      VARCHAR,               -- plain-text JD (for tech-stack search)
     posted_at        DATE,
     salary_min       DOUBLE,
     salary_max       DOUBLE,
@@ -79,42 +79,43 @@ class Store:
 
     def seen_ids(self) -> set[str]:
         """job_ids already on file. A scan skips any job whose job_id is here.
-        Since job_id = sha1(source:canonical_url), tracking-token variants of the
-        same ad share an id and are collapsed automatically."""
+        Since job_id = sha1(source:role_key) (company+title+city), token-variants
+        AND agency reposts of one vacancy share an id and collapse automatically —
+        each stored row is already a distinct vacancy."""
         return {row[0] for row in self.con.execute("SELECT job_id FROM jobs").fetchall()}
 
-    def seen_fingerprints(self) -> set[str]:
-        """Content fingerprints already on file, computed on the fly from
-        company+title (blanks dropped). A scan notifies only for jobs whose
-        fingerprint is NOT here — suppressing agency reposts of a role we've
-        already pinged about (same role, brand-new ad-id)."""
-        rows = self.con.execute("SELECT company, title FROM jobs").fetchall()
-        return {fp for c, t in rows if (fp := fingerprint(c, t)) is not None}
-
     def upsert(self, job: Job) -> bool:
-        """Insert a new job; if it already exists just bump last_seen. Returns
-        True if the row was newly inserted. job_id is canonical-URL based, so the
-        same Adzuna ad arriving under a fresh tracking token resolves to the same
-        id and is recognised as a duplicate instead of inserted as a phantom."""
+        """Insert a new job; if the same vacancy already exists just bump
+        last_seen. Returns True if the row was newly inserted. job_id is the
+        role+city identity, so a repost of the same role (new ad-id or fresh
+        tracking token) resolves to the same id and is recognised as a duplicate
+        instead of inserted again."""
         now = _now()
         exists = self.con.execute(
             "SELECT 1 FROM jobs WHERE job_id = ?", [job.job_id]
         ).fetchone()
         if exists:
+            # Bump last_seen. If the vacancy had expired (fell off its source) but
+            # is listed again, reactivate it to 'new'. Never touch a terminal human
+            # verdict (evaluated/applied/rejected) — only 'expired' flips back.
             self.con.execute(
-                "UPDATE jobs SET last_seen = ? WHERE job_id = ?", [now, job.job_id]
+                """UPDATE jobs SET last_seen = ?,
+                       status = CASE WHEN status = 'expired' THEN 'new' ELSE status END
+                   WHERE job_id = ?""",
+                [now, job.job_id],
             )
             return False
         self.con.execute(
             """INSERT INTO jobs
-               (job_id, source, company, title, url, location, location_cleaned, posted_at,
-                salary_min, salary_max, currency, remote, status,
+               (job_id, source, company, title, url, location, location_cleaned, description,
+                posted_at, salary_min, salary_max, currency, remote, status,
                 first_seen, last_seen, raw)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'new', ?, ?, ?)""",
             [
                 job.job_id, job.source, job.company, job.title, job.url, job.location,
-                clean_location(job.location), job.posted_at, job.salary_min, job.salary_max,
-                job.currency, job.remote, now, now, json.dumps(job.raw, default=str),
+                clean_location(job.location), job.description, job.posted_at, job.salary_min,
+                job.salary_max, job.currency, job.remote, now, now,
+                json.dumps(job.raw, default=str),
             ],
         )
         return True
@@ -168,23 +169,38 @@ class Store:
         "status", "score", "salary_min", "salary_max", "currency", "first_seen", "last_seen",
     )
 
-    def list_jobs(self, limit: int = 500) -> list[dict]:
+    def list_jobs(self, limit: int = 500, q: str | None = None) -> list[dict]:
         """All jobs, newest-discovered first, with timestamps + status — for the
         dashboard. `first_seen` = when a scan first found it; `last_seen` = the
-        most recent scan that still saw it (a stale value ≈ the posting is gone)."""
+        most recent scan that still saw it (a stale value ≈ the posting is gone).
+
+        `q` is a free-text search matched (case-insensitive substring) against
+        title + company + description, so tech-stack terms in the JD (e.g.
+        "spark") are searchable even when they're not in the title. The bulky
+        `description` is searched server-side but not returned in the payload."""
+        where, params = "", []
+        if q and q.strip():
+            where = """WHERE lower(coalesce(title,'') || ' ' || coalesce(company,'')
+                              || ' ' || coalesce(description,'')) LIKE ?"""
+            params.append(f"%{q.strip().lower()}%")
+        params.append(limit)
         rows = self.con.execute(
             f"""SELECT {", ".join(self.LIST_COLS)}
-                FROM jobs ORDER BY first_seen DESC LIMIT ?""",
-            [limit],
+                FROM jobs {where} ORDER BY first_seen DESC LIMIT ?""",
+            params,
         ).fetchall()
         return [dict(zip(self.LIST_COLS, r)) for r in rows]
 
-    def prune_stale(self, max_age_hours: int, sources: list[str]) -> int:
-        """Delete still-`new` jobs not seen for `max_age_hours` — they've dropped
-        off their source (closed/filled) and would otherwise pile up. Guards:
-        only `status='new'` (keep evaluated/applied history) and only the given
-        `sources` (pass those that scanned OK this run, so an outage can't wipe
-        jobs). Returns rows deleted."""
+    def expire_stale(self, max_age_hours: int, sources: list[str]) -> int:
+        """Mark still-`new` jobs not seen for `max_age_hours` as `expired` — they've
+        dropped off their source's listing, so the posting is closed/filled. We mark
+        (not delete) so the row stays for history + is filterable, and reappears as
+        `new` if it's listed again (see upsert). Guards: only `status='new'` (never
+        touch a human verdict) and only the given `sources` (pass those that scanned
+        OK this run, so a source outage can't expire everything). Returns rows marked.
+
+        Active views (`/api/pending`, `/jobs`, the dashboard's new filter) select
+        `status='new'`, so expired jobs drop off them automatically."""
         if not sources or max_age_hours <= 0:
             return 0
         cutoff = _now() - timedelta(hours=max_age_hours)
@@ -193,7 +209,7 @@ class Store:
         params = [cutoff, *sources]
         n = self.con.execute(f"SELECT count(*) FROM jobs WHERE {where}", params).fetchone()[0]
         if n:
-            self.con.execute(f"DELETE FROM jobs WHERE {where}", params)
+            self.con.execute(f"UPDATE jobs SET status = 'expired' WHERE {where}", params)
         return n
 
     def funnel(self) -> dict[str, int]:

@@ -10,7 +10,6 @@ from . import setup_logging
 from .config import ROOT, load_config
 
 logger = logging.getLogger("job_radar.scan")
-from .dedup import fingerprint
 from .filters import build_location_filter, build_title_filter
 from .schema import Job
 from .sources import REGISTRY
@@ -49,17 +48,14 @@ def run_scan(
     if not dry_run:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         s = Store(db_path)
-        seen = s.seen_ids()               # storage dedup (canonical-URL job_ids)
-        seen_fps = s.seen_fingerprints()  # notification dedup (content fingerprints)
+        seen = s.seen_ids()  # job_ids on file = vacancies already stored (role+city)
         s.close()
     else:
         seen = set()
-        seen_fps = set()
 
     http = client()
-    totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0, "pruned": 0, "notify": 0}
-    new_jobs: list[Job] = []
-    notify_jobs: list[Job] = []  # fingerprint-new subset → what we actually ping about
+    totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0, "expired": 0}
+    new_jobs: list[Job] = []  # newly-inserted vacancies → exactly what we notify
     live_sources: list[str] = []  # sources that fetched OK this run (safe to prune)
     started = datetime.now(timezone.utc)
 
@@ -91,20 +87,11 @@ def run_scan(
             if not title_ok(job.title) or not loc_ok(job.location):
                 filtered += 1
                 continue
-            if job.job_id in seen:  # same ad (canonical URL) already stored — merge, don't re-add
+            if job.job_id in seen:  # same vacancy (role+city) already stored — merge, don't re-add
                 dupes += 1
                 continue
             seen.add(job.job_id)
-            new_jobs.append(job)
-            # Notify once per distinct role: a fingerprint-new job is a genuinely
-            # new posting; reposts of an already-seen role (new ad-id, same
-            # company+title) are stored but suppressed from the ping. fp=None
-            # (blank company/title) can't be deduped safely → always notify.
-            fp = fingerprint(job.company, job.title)
-            if fp is None or fp not in seen_fps:
-                if fp is not None:
-                    seen_fps.add(fp)
-                notify_jobs.append(job)
+            new_jobs.append(job)  # a new job_id = a new vacancy → notify-worthy
             if store and store.upsert(job):
                 new += 1
             elif store is None:
@@ -120,34 +107,33 @@ def run_scan(
     http.close()
     totals["notify"] = len(notify_jobs)
 
-    # Prune jobs that dropped off their (successfully-scanned) source > N hours
-    # ago — closed/filled postings that would otherwise inflate the store.
+    # Mark jobs that dropped off their (successfully-scanned) source > N hours ago
+    # as 'expired' — the posting is closed/filled. Marked, not deleted, so it stays
+    # for history and reactivates if relisted (see Store.upsert / expire_stale).
     if not dry_run and live_sources:
         s = Store(db_path)
-        totals["pruned"] = s.prune_stale(int(cfg.get("prune_after_hours", 72)), live_sources)
+        totals["expired"] = s.expire_stale(int(cfg.get("expire_after_hours", 24)), live_sources)
         s.close()
-        if totals["pruned"]:
-            log(f"  ⌫ pruned {totals['pruned']} stale job(s)")
+        if totals["expired"]:
+            log(f"  ⌫ expired {totals['expired']} closed job(s)")
 
     log(
         f"scan complete — found {totals['found']}, new {totals['new']}, "
-        f"notify {totals['notify']}, merged {totals['dupes']}, "
-        f"filtered {totals['filtered']}, pruned {totals['pruned']}, "
-        f"errors {totals['errors']}"
+        f"merged {totals['dupes']}, filtered {totals['filtered']}, "
+        f"expired {totals['expired']}, errors {totals['errors']}"
     )
-
-    def _summ(j: Job) -> dict:
-        return {"source": j.source, "company": j.company, "title": j.title,
-                "location": j.location, "url": j.url}
 
     return {
         "started": started.isoformat(),
         "finished": datetime.now(timezone.utc).isoformat(),
         "totals": totals,
-        # new_jobs = URL-new (storage/dashboard view); notify_jobs = the
-        # fingerprint-new subset we actually ping about (one per distinct role).
-        "new_jobs": [_summ(j) for j in new_jobs],
-        "notify_jobs": [_summ(j) for j in notify_jobs],
+        # new_jobs = newly-inserted vacancies (one row per role+city) — both the
+        # storage/dashboard view and exactly what we notify about.
+        "new_jobs": [
+            {"source": j.source, "company": j.company, "title": j.title,
+             "location": j.location, "url": j.url}
+            for j in new_jobs
+        ],
     }
 
 
@@ -170,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     bar = "━" * 45
     date = datetime.now(timezone.utc).date().isoformat()
     print(f"\n{bar}\nJob Scan — {date}\n{bar}")
-    for k in ("found", "new", "notify", "dupes", "filtered", "errors", "pruned"):
+    for k in ("found", "new", "dupes", "filtered", "errors", "expired"):
         print(f"{k.capitalize()+':':9} {t[k]}")
     if result["new_jobs"]:
         print("\nNew matches:")

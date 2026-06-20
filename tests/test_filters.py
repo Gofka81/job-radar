@@ -33,8 +33,9 @@ def test_location_no_config_passes_all():
 
 
 def test_job_id_is_stable_and_source_scoped():
-    a = make_job_id("reed", "https://x/1")
-    assert a == make_job_id("reed", "https://x/1")
-    assert a != make_job_id("adzuna", "https://x/1")
-    job = Job(source="reed", company="Acme", title="Data Engineer", url="https://x/1")
-    assert job.job_id == a
+    a = make_job_id("reed", "Acme", "Data Engineer", "London", "https://x/1")
+    assert a == make_job_id("reed", "Acme", "Data Engineer", "London", "https://x/1")
+    assert a != make_job_id("adzuna", "Acme", "Data Engineer", "London", "https://x/1")
+    # Job.job_id derives city from raw location via clean_location("London, UK") → "London"
+    job = Job(source="reed", company="Acme", title="Data Engineer", url="https://x/9", location="London, UK")
+    assert job.job_id == a  # URL differs but role+city identical → same id

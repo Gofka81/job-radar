@@ -44,23 +44,48 @@ location_filter:
   # Note: a "London (Remote)" role passes via "Remote"; pure on-site London with no
   # remote tag won't match allow unless "London" is added. Tune to taste.
 
+# --- Lifecycle ---
+# A 'new' job not seen in a source's listing for this many hours is marked
+# 'expired' (closed/filled) and drops off the active list — it reactivates if it
+# reappears. Source-presence is the reliable signal; we don't URL-poke (aggregators
+# block bots). 24h tolerates a missed scan or two before expiring.
+expire_after_hours: 24
+
 # --- Sources ---
 sources:
   adzuna:
     enabled: true
     country: gb
     queries: ["data engineer", "analytics engineer", "databricks"]
-    where: "Edinburgh"        # anchor for distance search; "" for nationwide
-    distance: 60              # km radius around `where`
-    max_days_old: 14
-    max_pages: 5
+    # Per-location targeting: each entry is its own date-sorted pull, so London's
+    # volume can't crowd out Edinburgh/Glasgow. where: "" = nationwide/remote pass.
+    # API BUDGET: calls/scan = queries × locations × max_pages. Adzuna free tier is
+    # ~250/day; with ~7 scans/day keep queries×locations×max_pages ≲ 35 (here 3×4×2=24).
+    locations:
+      - { where: "Edinburgh", distance: 40 }   # km
+      - { where: "Glasgow",   distance: 40 }
+      - { where: "London",    distance: 30 }
+      - { where: "" }                          # nationwide + remote catch-all
+    category: it-jobs          # server-side narrowing; "" to disable
+    # Server-side exclude to stop obvious non-matches eating the page budget.
+    # CAUTION: this matches the FULL ad text, not just the title — so keep it to
+    # words that never appear in a mid-level DE description. Do NOT add
+    # senior/lead/manager here (they show up in plenty of mid-level JDs and you'd
+    # lose real roles); the title_filter.negative list trims those precisely.
+    what_exclude: "graduate intern apprentice apprenticeship internship placement"
+    sort_by: date              # freshest first
+    max_days_old: 7            # tight window — we scan often + dedup makes re-fetch free
+    max_pages: 2               # keep low: multiplies with queries × locations
     results_per_page: 50
 
   reed:
     enabled: true
     queries: ["data engineer", "analytics engineer"]
-    location: "Edinburgh"     # "" for nationwide
-    distance: 40              # miles (Reed uses miles)
+    locations:                 # mirror of adzuna; distance in MILES for Reed
+      - { where: "Edinburgh", distance: 40 }
+      - { where: "Glasgow",   distance: 40 }
+      - { where: "London",    distance: 30 }
+      - { where: "" }                          # nationwide
     results_to_take: 100
 
   # ATS boards take a list of company slugs (the bit after the ATS domain).

@@ -79,12 +79,10 @@ def job_line(j: dict) -> str:
 
 
 def notify_new_jobs(result: dict) -> None:
-    """Push the new matches from a scan result (run_scan() output). Uses
-    `notify_jobs` — the fingerprint-deduped subset (one ping per distinct role,
-    not per reposted ad-id) — falling back to `new_jobs` for older callers."""
-    new = result.get("notify_jobs")
-    if new is None:
-        new = result.get("new_jobs") or []
+    """Push the new matches from a scan result (run_scan() output). `new_jobs` is
+    already one row per vacancy (role+city) — dedup happens at write time via the
+    job_id — so every entry here is a genuinely new vacancy worth a ping."""
+    new = result.get("new_jobs") or []
     to = chat_id()
     if not new or not to:
         return

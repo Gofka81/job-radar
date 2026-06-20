@@ -42,19 +42,28 @@ DASHBOARD_HTML = """<!doctype html>
            border:1px solid var(--line); background:var(--card); color:var(--fg); }
   .controls select { flex:0 0 auto; }
   #recency.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
   #msg { color:var(--muted); font-size:13px; padding:6px 0; }
+  .cfgbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; }
+  #cfg { width:100%; min-height:60vh; padding:12px; border-radius:8px;
+         border:1px solid var(--line); background:var(--card); color:var(--fg);
+         font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical;
+         white-space:pre; tab-size:2; }
 </style>
 </head>
 <body>
 <header>
   <h1>📡 job-radar</h1>
-  <select id="sort">
-    <option value="recent">Recent</option>
-    <option value="company">Company</option>
-    <option value="location">Location</option>
-    <option value="score">Score</option>
-  </select>
-  <button id="scan">Scan now</button>
+  <span id="jobsTools">
+    <select id="sort">
+      <option value="recent">Recent</option>
+      <option value="company">Company</option>
+      <option value="location">Location</option>
+      <option value="score">Score</option>
+    </select>
+    <button id="scan">Scan now</button>
+  </span>
+  <button id="tab">⚙ Config</button>
   <button id="refresh">↻</button>
 </header>
 <div class="wrap">
@@ -62,17 +71,33 @@ DASHBOARD_HTML = """<!doctype html>
     <input id="token" placeholder="API token" autocomplete="off">
     <button id="save">Save</button>
   </div>
-  <div id="chips" class="chips"></div>
-  <div class="controls">
-    <input id="q" placeholder="Search title / company… (e.g. spark)" autocomplete="off">
-    <select id="fstatus"><option value="">All statuses</option></select>
-    <select id="floc"><option value="">All locations</option></select>
-    <select id="fsource"><option value="">All sources</option></select>
-    <input id="fsalary" type="number" min="0" step="5000" placeholder="Min £" inputmode="numeric">
-    <button id="recency">Recent</button>
+
+  <div id="jobsView">
+    <div id="chips" class="chips"></div>
+    <div class="controls">
+      <input id="q" placeholder="Search title / company / JD — e.g. spark, airflow" autocomplete="off">
+      <select id="fstatus"><option value="">All statuses</option></select>
+      <select id="floc"><option value="">All locations</option></select>
+      <select id="fsource"><option value="">All sources</option></select>
+      <input id="fsalary" type="number" min="0" step="5000" placeholder="Min £" inputmode="numeric">
+      <button id="recency">Recent</button>
+    </div>
+    <div id="msg"></div>
+    <div id="list"></div>
   </div>
-  <div id="msg"></div>
-  <div id="list"></div>
+
+  <div id="configView" style="display:none">
+    <div class="cfgbar">
+      <button id="cfgSave">Save config</button>
+      <button id="cfgReload">Reload</button>
+      <span id="cfgMsg" class="muted"></span>
+    </div>
+    <textarea id="cfg" spellcheck="false" autocapitalize="off" autocomplete="off"
+              placeholder="Loading config…"></textarea>
+    <div class="muted" style="font-size:12px;margin-top:6px;">
+      Edits save to the Pi’s config.yml — the next scan picks them up (no redeploy).
+    </div>
+  </div>
 </div>
 <script>
 const $ = s => document.querySelector(s);
@@ -106,7 +131,8 @@ function fillFilter(sel, label, values) {
   sel.value = cur;  // keep selection across reloads
 }
 function viewJobs() {
-  const q = $("#q").value.trim().toLowerCase();
+  // Text search (#q) is server-side (it matches the JD too) — see fetchJobs().
+  // The rest filter the loaded set client-side for instant response.
   const st = $("#fstatus").value, loc = $("#floc").value, src = $("#fsource").value;
   const minSal = parseFloat($("#fsalary").value) || 0;
   const now = Date.now();
@@ -116,7 +142,6 @@ function viewJobs() {
     (!src || j.source === src) &&
     // min salary on salary_max; keep jobs with no salary data visible
     (!minSal || j.salary_max == null || j.salary_max >= minSal) &&
-    (!q || (`${j.title||""} ${j.company||""}`).toLowerCase().includes(q)) &&
     (SHOW_ALL || !j.first_seen || (now - new Date(j.first_seen).getTime()) <= RECENT_MS));
   const k = $("#sort").value;
   const by = { recent:(a,b)=> (b.first_seen||"").localeCompare(a.first_seen||""),
@@ -156,6 +181,16 @@ function render(list) {
   }).join("") || '<div class="muted">No jobs yet — hit “Scan now”.</div>';
 }
 
+async function fetchJobs() {
+  // Search (incl. JD/tech-stack) is server-side; the q is sent to /api/jobs.
+  const q = $("#q").value.trim();
+  const url = "/api/jobs?limit=500" + (q ? "&q=" + encodeURIComponent(q) : "");
+  JOBS = (await (await api(url)).json()).jobs || [];
+  fillFilter($("#fstatus"), "All statuses", JOBS.map(j => j.status));
+  fillFilter($("#floc"), "All locations", JOBS.map(j => j.location_cleaned));
+  fillFilter($("#fsource"), "All sources", JOBS.map(j => j.source));
+  viewJobs();
+}
 async function load() {
   if (!TOKEN) return showAuth("Enter your API token to view jobs.");
   $("#auth").style.display="none";
@@ -163,18 +198,48 @@ async function load() {
     const f = await (await api("/api/funnel")).json();
     $("#chips").innerHTML = Object.entries(f).map(([k,v]) =>
       `<div class="chip"><b>${v}</b><span>${k}</span></div>`).join("");
-    JOBS = (await (await api("/api/jobs?limit=500")).json()).jobs || [];
-    fillFilter($("#fstatus"), "All statuses", JOBS.map(j => j.status));
-    fillFilter($("#floc"), "All locations", JOBS.map(j => j.location_cleaned));
-    fillFilter($("#fsource"), "All sources", JOBS.map(j => j.source));
-    viewJobs();
+    await fetchJobs();
   } catch(e){ if (e.message!=="auth") $("#msg").textContent = "Error: "+e.message; }
 }
 
-$("#save").onclick = () => { TOKEN = $("#token").value.trim(); localStorage.setItem("jr_token", TOKEN); load(); };
-$("#refresh").onclick = load;
+// --- config editor --------------------------------------------------------
+let VIEW = "jobs";
+function showView(v) {
+  VIEW = v;
+  $("#jobsView").style.display = v==="jobs" ? "" : "none";
+  $("#configView").style.display = v==="config" ? "" : "none";
+  $("#jobsTools").style.display = v==="jobs" ? "" : "none";
+  $("#tab").textContent = v==="jobs" ? "⚙ Config" : "← Jobs";
+  $("#tab").classList.toggle("on", v==="config");
+}
+async function loadConfig() {
+  if (!TOKEN) return showAuth("Enter your API token to edit config.");
+  $("#cfgMsg").textContent = "loading…";
+  try {
+    const txt = await (await api("/api/config")).text();
+    $("#cfg").value = txt;
+    $("#cfgMsg").textContent = "";
+  } catch(e){ if (e.message!=="auth") $("#cfgMsg").textContent = "Error: "+e.message; }
+}
+async function saveConfig() {
+  $("#cfgMsg").textContent = "saving…";
+  try {
+    const r = await api("/api/config", {
+      method:"POST", headers:{ "content-type":"text/plain" }, body: $("#cfg").value });
+    const data = await r.json().catch(()=>({}));
+    if (r.ok) $("#cfgMsg").textContent = "✅ saved — applies on next scan ("+(data.sources||[]).join(", ")+")";
+    else $("#cfgMsg").textContent = "❌ " + (data.detail || ("HTTP "+r.status));  // 400 = invalid YAML
+  } catch(e){ if (e.message!=="auth") $("#cfgMsg").textContent = "Error: "+e.message; }
+}
+
+$("#save").onclick = () => { TOKEN = $("#token").value.trim(); localStorage.setItem("jr_token", TOKEN); (VIEW==="config"?loadConfig():load()); };
+$("#refresh").onclick = () => VIEW==="config" ? loadConfig() : load();
+$("#tab").onclick = () => { if (VIEW==="jobs"){ showView("config"); loadConfig(); } else { showView("jobs"); } };
+$("#cfgSave").onclick = saveConfig;
+$("#cfgReload").onclick = loadConfig;
 $("#sort").onchange = viewJobs;
-$("#q").oninput = viewJobs;
+let qTimer;  // debounce server-side search so we don't refetch on every keystroke
+$("#q").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(fetchJobs, 300); };
 $("#fstatus").onchange = viewJobs;
 $("#floc").onchange = viewJobs;
 $("#fsource").onchange = viewJobs;

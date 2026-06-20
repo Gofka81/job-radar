@@ -25,6 +25,7 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                     title=it.get("title", "") or "",
                     url=url,
                     location=it.get("location", "") or "",
+                    description=it.get("descriptionPlain", "") or "",
                     raw=it,
                 )
             )

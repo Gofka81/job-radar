@@ -6,6 +6,7 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
+from .base import cfg_locations, strip_tags
 
 ID = "reed"
 BASE = "https://www.reed.co.uk/api/1.0/search"
@@ -28,35 +29,38 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
         raise RuntimeError("REED_API_KEY not set in environment (.env)")
 
     queries = cfg.get("queries", ["data engineer"])
-    location = cfg.get("location", "")
-    distance = cfg.get("distance", 30)
     take = cfg.get("results_to_take", 100)
+    # Per-location targeting (mirror of adzuna): query priority cities separately
+    # so each gets its own budget. where="" = nationwide. Legacy `location` honoured.
+    locations = cfg_locations(cfg, "location", cfg.get("distance", 30))
     auth = (key, "")  # Reed: API key as username, blank password (HTTP Basic)
 
     jobs: list[Job] = []
     for q in queries:
-        params: dict = {"keywords": q, "resultsToTake": take}
-        if location:
-            params["locationName"] = location
-            params["distanceFromLocation"] = distance
-        resp = http.get(BASE, params=params, auth=auth)
-        resp.raise_for_status()
-        for it in resp.json().get("results", []):
-            url = it.get("jobUrl") or ""
-            if not url:
-                continue
-            jobs.append(
-                Job(
-                    source=ID,
-                    company=it.get("employerName", "") or "",
-                    title=it.get("jobTitle", "") or "",
-                    url=url,
-                    location=it.get("locationName", "") or "",
-                    posted_at=_parse_date(it.get("date")),
-                    salary_min=it.get("minimumSalary"),
-                    salary_max=it.get("maximumSalary"),
-                    currency="GBP",
-                    raw=it,
+        for where, distance in locations:
+            params: dict = {"keywords": q, "resultsToTake": take}
+            if where:
+                params["locationName"] = where
+                params["distanceFromLocation"] = distance
+            resp = http.get(BASE, params=params, auth=auth)
+            resp.raise_for_status()
+            for it in resp.json().get("results", []):
+                url = it.get("jobUrl") or ""
+                if not url:
+                    continue
+                jobs.append(
+                    Job(
+                        source=ID,
+                        company=it.get("employerName", "") or "",
+                        title=it.get("jobTitle", "") or "",
+                        url=url,
+                        location=it.get("locationName", "") or "",
+                        description=strip_tags(it.get("jobDescription", "")),
+                        posted_at=_parse_date(it.get("date")),
+                        salary_min=it.get("minimumSalary"),
+                        salary_max=it.get("maximumSalary"),
+                        currency="GBP",
+                        raw=it,
+                    )
                 )
-            )
     return jobs

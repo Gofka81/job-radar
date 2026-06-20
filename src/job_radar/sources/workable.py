@@ -5,6 +5,7 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
+from .base import strip_tags
 
 ID = "workable"
 # Public widget JSON — no auth. Slug is the apply.workable.com/{slug} subpath.
@@ -44,6 +45,7 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                     title=it.get("title", "") or "",
                     url=url,
                     location=_location(it),
+                    description=strip_tags(it.get("description", "")),
                     posted_at=_parse_date(it.get("published_on")),
                     remote=it.get("telecommuting"),
                     raw=it,
