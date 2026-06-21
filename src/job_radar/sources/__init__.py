@@ -5,6 +5,6 @@ To add a source: drop a module here and add it to REGISTRY below. Nothing else c
 
 from __future__ import annotations
 
-from . import adzuna, ashby, greenhouse, lever, reed, workable
+from . import adzuna, ashby, greenhouse, lever, oracle, reed, workable, workday
 
-REGISTRY = {m.ID: m for m in (adzuna, reed, greenhouse, lever, ashby, workable)}
+REGISTRY = {m.ID: m for m in (adzuna, reed, greenhouse, lever, ashby, workable, workday, oracle)}

@@ -114,3 +114,31 @@ sources:
   ashby:
     enabled: false
     companies: []             # ← verify slugs
+
+  # Workday is self-hosted per employer (UK banks/enterprise: NatWest, Lloyds…).
+  # Find host+site from the careers URL: https://{host}/{lang}/{site} — e.g.
+  # https://natwest.wd3.myworkdayjobs.com/en-US/NatWestGroup → host=natwest.wd3.
+  # myworkdayjobs.com, site=NatWestGroup. `queries` narrows server-side so we only
+  # pull JD detail for relevant roles; keep them tight to save requests.
+  workday:
+    enabled: false
+    queries: ["data engineer", "data platform", "analytics engineer"]
+    max_pages: 2
+    companies:
+      # Verified working (returns the CXS JSON). Add your targets the same way —
+      # host+site come from the careers URL https://{host}/{lang}/{site}.
+      - { host: "livenation.wd503.myworkdayjobs.com", site: "TMExternalSite", name: "Live Nation" }
+      # - { host: "natwest.wd3.myworkdayjobs.com", site: "NatWestGroup", name: "NatWest" }  ← verify
+
+  # Oracle Cloud Recruiting (ORC) — self-hosted per tenant (banks: JPMorgan…).
+  # site = the `siteNumber` from the careers URL
+  # https://{host}/hcmUI/CandidateExperience/en/sites/{site}. `keyword` (queries)
+  # searches the full JD server-side.
+  oracle:
+    enabled: false
+    queries: ["data engineer", "data platform", "analytics engineer"]
+    max_pages: 2
+    companies:
+      # Verified working (returns the CE REST JSON).
+      - { host: "jpmc.fa.oraclecloud.com", site: "CX_1001", name: "JPMorgan" }
+      # - { host: "hdpc.fa.us2.oraclecloud.com", site: "LateralHiring", name: "..." }  ← verify
