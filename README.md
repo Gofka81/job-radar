@@ -17,8 +17,9 @@ and writes a shortlist into career-ops's `data/pipeline.md`. career-ops then doe
 ## Features
 
 **Discovery (deterministic — zero LLM tokens)**
-- **6 source connectors** — Adzuna + Reed (aggregators) and Greenhouse / Lever / Ashby / Workable (company
-  ATS boards). Adding a source is one file + one registry line.
+- **8 source connectors** — Adzuna + Reed (aggregators), Greenhouse / Lever / Ashby / Workable (company
+  ATS boards), and Workday / Oracle ORC (self-hosted enterprise sites). Adding a source is one file + one
+  registry line.
 - **Per-location targeting** — each priority area (Edinburgh / Glasgow / London / nationwide) gets its own
   date-sorted query budget, so high-volume London can't crowd Scotland out of the results.
 - **Server-side narrowing** — Adzuna `category=it-jobs`, full-text `what_exclude`, and a tight
@@ -26,17 +27,18 @@ and writes a shortlist into career-ops's `data/pipeline.md`. career-ops then doe
 - **Title + location filters** — case-insensitive include/exclude lists, kept broad (all UK + remote).
 
 **Dedup & lifecycle**
-- **Write-time dedup** — `job_id = sha1(company | title | city)`: one vacancy = one row. Tracking-token
-  variants, agency reposts under new ad-ids, "London" vs "London, UK", and the *same ad on multiple
-  sources* all collapse — while the same title in a **different city** stays distinct (Edinburgh is
-  never lost to a London scrape).
-- **Closed-job expiry** — a job that drops off its source listing is marked `expired` (and reactivates
-  if it reappears), so the active list reflects what's still open.
+- **Write-time dedup** — identity is `vacancy_key = sha1(company | title)`, source- and city-agnostic:
+  tracking-token variants, agency reposts under new ad-ids, the *same ad on multiple sources*, and the
+  *same posting listed in several cities* all collapse to one row. City is an attribute — a multi-city
+  posting accumulates a `locations` set (shown as a chip + "+N"), so no opening is lost.
+- **Closed-job expiry + generations** — a job that drops off its source for `expire_after_hours` is marked
+  `expired`; the same window is the dedup horizon, so a posting that *reappears after expiring* gets a
+  fresh row (a new evaluation), while the old one is kept as history.
 - **Single DB writer** — one process owns DuckDB (scheduled + on-demand scans + API), no lock fights.
 
 **Dashboard & notifications**
 - **Phone-friendly web dashboard** (`GET /`) — funnel chips, job list, and filters by status, location,
-  source, and min-salary, defaulting to the last 72h with a show-all toggle.
+  source, and min-salary, defaulting to the last 48h with a show-all toggle.
 - **Full-text / tech-stack search** — searches the job description server-side, so terms like *spark* or
   *airflow* are found even when they're not in the title.
 - **In-dashboard config editor** — edit `config.yml` from your phone; validated and applied on next scan,
@@ -96,14 +98,14 @@ cloudflared tunnel at the published port. See `docs/PLAN.md` for the full archit
 
 ## Sources
 
-| Provider | Covers | Status |
-|----------|--------|--------|
-| Adzuna (`gb`) | Broad UK aggregator (Reed/Totaljobs/CV-Library/company sites), nationwide | ✅ |
-| Reed | Direct UK, nationwide | ✅ |
-| Greenhouse / Lever / Ashby | UK + global companies (slugs from career-ops `portals.yml`) | ✅ |
-| Workable | Companies on Workable (e.g. Starling, Hugging Face) | ✅ |
-| Workday | Enterprise career sites (NatWest, Lloyds…) | ⏳ Phase 5 |
-| Oracle ORC | JPMorgan + banks | ⏳ Phase 5 |
+| Provider | Covers |
+|----------|--------|
+| Adzuna (`gb`) | Broad UK aggregator (Reed/Totaljobs/CV-Library/company sites), nationwide |
+| Reed | Direct UK, nationwide |
+| Greenhouse / Lever / Ashby | UK + global companies (board slugs; vanity-domain boards work too) |
+| Workable | Companies on Workable (e.g. Starling, Hugging Face) |
+| Workday | Self-hosted enterprise sites (`{host, site}` per tenant — e.g. Live Nation, CrowdStrike) |
+| Oracle ORC | Self-hosted CandidateExperience sites (e.g. JPMorgan, Goldman Sachs, Bank of England) |
 
-Anything without a structured API (LinkedIn, bespoke sites) → paste the URL into career-ops's
-`pipeline.md` manually. That's the designed fallback, not a gap.
+Adding a source is one file + one registry line. Anything without a structured API (LinkedIn, bespoke
+portals) → paste the URL into career-ops's `pipeline.md` manually. That's the designed fallback, not a gap.
