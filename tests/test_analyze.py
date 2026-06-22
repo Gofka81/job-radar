@@ -125,6 +125,34 @@ def test_is_budget_error_detects_rate_and_billing():
     assert not analyze._is_budget_error(RuntimeError("bad json"))
 
 
+def test_is_auth_error_detects_not_logged_in():
+    assert analyze._is_auth_error(RuntimeError("claude: Not logged in · Please run /login"))
+    assert analyze._is_auth_error(RuntimeError("invalid x-api-key"))
+    assert analyze._is_auth_error(type("AuthenticationError", (Exception,), {})("x"))
+    assert not analyze._is_auth_error(RuntimeError("bad json"))
+    # auth must NOT be misread as budget (the prod bug)
+    assert not analyze._is_budget_error(RuntimeError("claude: Not logged in · Please run /login"))
+
+
+def test_run_analyze_stops_fast_on_auth_error(tmp_path, monkeypatch):
+    """'Not logged in' fails every job → stop after the FIRST with auth_failed, not
+    budget_hit, and don't hammer the CLI for all 88 jobs."""
+    db = tmp_path / "a.duckdb"
+    _seed(db, 5)
+    monkeypatch.setattr(analyze, "load_rubric", lambda: "r")
+    calls = {"n": 0}
+
+    def fake(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("claude: Not logged in · Please run /login")
+
+    monkeypatch.setattr(analyze, "_score_cli", fake)
+    result = run_analyze(CFG, str(db))
+
+    assert result["auth_failed"] is True and result["budget_hit"] is False
+    assert calls["n"] == 1 and result["totals"]["scored"] == 0  # stopped after one
+
+
 def test_run_analyze_requires_rubric(tmp_path, monkeypatch):
     _seed(tmp_path / "a.duckdb", 1)
     monkeypatch.setattr(analyze, "load_rubric", lambda: "")  # no rubric saved

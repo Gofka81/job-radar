@@ -19,7 +19,8 @@ DASHBOARD_HTML = """<!doctype html>
            padding:12px 16px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   h1 { font-size:18px; margin:0; flex:1; }
   button, select { background:var(--card); color:var(--fg); border:1px solid var(--line);
-           border-radius:8px; padding:7px 12px; font-size:14px; cursor:pointer; }
+           border-radius:8px; padding:7px 12px; font-size:14px; cursor:pointer;
+           min-height:36px; line-height:1; }
   button:active { transform:translateY(1px); }
   .wrap { padding:14px 16px; max-width:760px; margin:0 auto; }
   .chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
@@ -32,6 +33,8 @@ DASHBOARD_HTML = """<!doctype html>
          padding:11px 13px; margin-bottom:9px; }
   .job a { color:var(--fg); text-decoration:none; font-weight:600; }
   .job a:hover { color:var(--accent); }
+  .jobhead { display:flex; gap:8px; align-items:flex-start; justify-content:space-between; }
+  .jobhead a { flex:1; }
   .meta { color:var(--muted); font-size:13px; margin-top:4px; display:flex; gap:8px; flex-wrap:wrap; }
   .pill { background:var(--pill); border-radius:20px; padding:1px 9px; font-size:12px; }
   .new { background:var(--new); color:#06210f; font-weight:700; }
@@ -42,9 +45,14 @@ DASHBOARD_HTML = """<!doctype html>
            border:1px solid var(--line); background:var(--card); color:var(--fg); }
   .controls select { flex:0 0 auto; }
   #recency.on { background:var(--accent); color:#fff; border-color:var(--accent); }
-  #tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #nav { display:flex; gap:6px; }
+  .navbtn { min-width:44px; text-align:center; }
+  #refresh { min-width:44px; }
+  .navbtn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .back { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
+  .mini { padding:4px 10px; min-height:30px; font-size:13px; }
   #msg { color:var(--muted); font-size:13px; padding:6px 0; }
-  .cfgbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; }
+  .cfgbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
   #cfg, #rubric { width:100%; min-height:60vh; padding:12px; border-radius:8px;
          border:1px solid var(--line); background:var(--card); color:var(--fg);
          font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical;
@@ -102,6 +110,7 @@ DASHBOARD_HTML = """<!doctype html>
 
   <div id="configView" style="display:none">
     <div class="cfgbar">
+      <button class="back">← Jobs</button>
       <button id="cfgSave">Save config</button>
       <button id="cfgReload">Reload</button>
       <span id="cfgMsg" class="muted"></span>
@@ -115,6 +124,7 @@ DASHBOARD_HTML = """<!doctype html>
 
   <div id="rubricView" style="display:none">
     <div class="cfgbar">
+      <button class="back">← Jobs</button>
       <button id="rubSave">Save rubric</button>
       <button id="rubReload">Reload</button>
       <span id="rubMsg" class="muted"></span>
@@ -129,6 +139,7 @@ DASHBOARD_HTML = """<!doctype html>
 
   <div id="usageView" style="display:none">
     <div class="cfgbar">
+      <button class="back">← Jobs</button>
       <button id="useReload">Reload</button>
       <span id="useMsg" class="muted"></span>
     </div>
@@ -216,7 +227,11 @@ function render(list) {
     const sal = salaryStr(j);
     const hasScore = j.score != null;
     return `<div class="job">
-      <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+      <div class="jobhead">
+        <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+        <button class="mini" data-jid="${esc(j.job_id)}"
+          title="Triage just this job (uses 1 Claude call)">✨${hasScore ? ' re' : ''}</button>
+      </div>
       <div class="meta">
         <span>${esc(j.company)}</span>
         ${hasScore ? `<span class="score">${Math.round(j.score)}/10</span>` : ''}
@@ -343,21 +358,35 @@ async function loadUsage() {
 }
 
 // --- triage (✨ Analyze) ---
+async function triage(target) {
+  try {
+    const r = await api("/api/analyze", {
+      method:"POST", headers:{ "content-type":"application/json" },
+      body: JSON.stringify({ mode:"triage", target }) });
+    if (r.status===409) { $("#msg").textContent = "Triage already running…"; return; }
+    $("#msg").textContent = "✨ Triage started…";
+    pollAnalyze();
+  } catch(e){}
+}
 async function pollAnalyze() {
   try {
     const s = await (await api("/api/analyze")).json();
     if (s.running) { $("#msg").textContent = "✨ Triage running…"; setTimeout(pollAnalyze, 2000); return; }
     const last = s.last || {};
-    if (last.budget_hit)
+    if (last.auth_failed)
+      $("#msg").innerHTML = '<span class="warn">⛔ Claude not logged in — set '
+        + 'CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) and redeploy.</span>';
+    else if (last.budget_hit)
       $("#msg").innerHTML = '<span class="warn">⛔ Out of budget / rate limited — triage stopped.</span>';
     else if (last.totals)
-      $("#msg").textContent = `✨ Triage done — scored ${last.totals.scored}, cost $${(last.cost_usd||0).toFixed(4)}`;
+      $("#msg").textContent = `✨ Triage done — scored ${last.totals.scored} (${last.totals.errors||0} err)`;
     fetchJobs();
   } catch(e){}
 }
 
 // --- wiring ---
 document.querySelectorAll(".navbtn").forEach(b => b.onclick = () => { showView(b.dataset.view); refreshView(); });
+document.querySelectorAll(".back").forEach(b => b.onclick = () => { showView("jobs"); load(); });
 $("#save").onclick = () => { TOKEN = $("#token").value.trim(); localStorage.setItem("jr_token", TOKEN); refreshView(); };
 $("#refresh").onclick = refreshView;
 $("#cfgSave").onclick = saveConfig;
@@ -379,15 +408,12 @@ $("#scan").onclick = async () => {
     $("#msg").textContent = r.status===409 ? "A scan is already running…" : "Scan started — refresh in a bit.";
   } catch(e){}
 };
-$("#analyze").onclick = async () => {
-  try {
-    const r = await api("/api/analyze", {
-      method:"POST", headers:{ "content-type":"application/json" },
-      body: JSON.stringify({ mode:"triage", target:"all_pending" }) });
-    if (r.status===409) { $("#msg").textContent = "Triage already running…"; return; }
-    $("#msg").textContent = "✨ Triage started…";
-    pollAnalyze();
-  } catch(e){}
+$("#analyze").onclick = () => triage("all_pending");
+// per-card ✨ button → triage just that one job (event delegation; re-scores even
+// if already triaged, since the server treats an explicit job_id list as force).
+$("#list").onclick = (e) => {
+  const b = e.target.closest("button.mini");
+  if (b && b.dataset.jid) triage([b.dataset.jid]);
 };
 load();
 </script>

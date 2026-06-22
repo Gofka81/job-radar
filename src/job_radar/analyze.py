@@ -83,6 +83,20 @@ def _is_budget_error(exc: Exception) -> bool:
         "usage limit", "rate limit", "limit reached",  # Claude Code / Pro phrasing
     ))
 
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True if the engine isn't authenticated — e.g. claude-cli not logged in, or a
+    missing/invalid key. Distinct from budget: it fails EVERY job, so the run should
+    stop fast with a clear 'set CLAUDE_CODE_OAUTH_TOKEN' message, not hammer the CLI."""
+    name = type(exc).__name__
+    if name in ("AuthenticationError", "PermissionDeniedError"):
+        return True
+    msg = str(exc).lower()
+    return any(w in msg for w in (
+        "not logged in", "please run /login", "invalid x-api-key", "invalid api key",
+        "authentication", "oauth", "not authenticated",
+    ))
+
 # Forced-JSON schema for one triage verdict. Structured outputs don't enforce
 # numeric bounds, so we clamp `score` to 0-10 client-side after parsing.
 TRIAGE_SCHEMA = {
@@ -188,12 +202,17 @@ def _score_cli(model: str, rubric: str, job: dict, *, timeout: int = 120):
         "--append-system-prompt", SYSTEM_PREFIX + rubric,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        # surfaces rate/usage-limit messages → _is_budget_error catches them
-        raise RuntimeError(f"claude -p failed: {(proc.stderr or proc.stdout).strip()[:300]}")
-    env = json.loads(proc.stdout)
-    if env.get("is_error") or env.get("subtype") not in (None, "success"):
-        raise RuntimeError(f"claude -p error: {str(env.get('result'))[:300]}")
+    # Parse the JSON envelope first (claude prints it on stdout even on errors), so
+    # we raise the human `result` message — e.g. "Not logged in · Please run /login"
+    # — not a 300-char raw-JSON dump. Clean text → correct auth/budget classification.
+    try:
+        env = json.loads(proc.stdout) if proc.stdout.strip() else None
+    except json.JSONDecodeError:
+        env = None
+    if env is None:
+        raise RuntimeError(f"claude: {(proc.stderr or proc.stdout or 'no output').strip()[:300]}")
+    if proc.returncode != 0 or env.get("is_error") or env.get("subtype") not in (None, "success"):
+        raise RuntimeError(f"claude: {str(env.get('result') or 'unknown error')[:300]}")
     tri = _parse_triage(env.get("result", ""))
     u = env.get("usage") or {}
     usage = {
@@ -252,11 +271,21 @@ def run_analyze(
     cost = 0.0
     results: list[dict] = []
     budget_hit = False
+    auth_failed = False
     for job in jobs:
         try:
             tri, u = (_score_cli(model, rubric, job) if use_cli
                       else _score(client, model, rubric, job))
         except Exception as exc:
+            if _is_auth_error(exc):
+                # NOT AUTHENTICATED: fails every job, so stop after the first with a
+                # clear, actionable message instead of hammering the CLI N times.
+                auth_failed = True
+                hint = ("set CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) and redeploy"
+                        if use_cli else "set a valid ANTHROPIC_API_KEY")
+                logger.error("LLM AUTH FAILED — stopping triage run (%s): %s", hint, exc)
+                log(f"  ⛔ not authenticated — {hint}. Stopped. ({exc})")
+                break
             if _is_budget_error(exc):
                 # OUT OF BUDGET: stop cleanly rather than hammer the API. Logged
                 # loudly + flagged so the dashboard/Telegram can surface it.
@@ -283,20 +312,21 @@ def run_analyze(
         })
         log(f"  ✓ {tri.score}/10 {job.get('company')} | {job.get('title')} — {tri.reason}")
 
+    note = "auth failed" if auth_failed else ("rate/usage limit" if budget_hit else "")
     s = Store(db_path)
     s.record_llm_run(
         run_id, stage="triage", model=model,
         engine="claude-cli" if use_cli else "anthropic",
         started=started, jobs=len(jobs),
         scored=totals["scored"], errors=totals["errors"], usage=usage, cost_usd=cost,
-        budget_hit=budget_hit, note="rate/usage limit" if budget_hit else "",
+        budget_hit=budget_hit, note=note,
     )
     s.close()
     log(
         f"triage complete — scored {totals['scored']}, errors {totals['errors']} — "
         f"{usage['input_tokens']:,} in ({usage['cache_read_tokens']:,} cached) / "
         f"{usage['output_tokens']:,} out ≈ ${cost:.4f}"
-        + ("  ⛔ BUDGET HIT" if budget_hit else "")
+        + ("  ⛔ AUTH FAILED" if auth_failed else "  ⛔ BUDGET HIT" if budget_hit else "")
     )
     return {
         "started": started.isoformat(),
@@ -306,5 +336,6 @@ def run_analyze(
         "usage": usage,
         "cost_usd": round(cost, 4),
         "budget_hit": budget_hit,
+        "auth_failed": auth_failed,
         "results": results,
     }

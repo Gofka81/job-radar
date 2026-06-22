@@ -87,15 +87,18 @@ def _guarded_analyze(db: str, job_ids: list[str] | None, only_untriaged: bool) -
             load_config(), db, job_ids=job_ids, only_untriaged=only_untriaged
         )
         _analyze_status["last"] = result
-        if result.get("budget_hit"):  # surface "out of budget" to the phone
+        alert = None
+        if result.get("auth_failed"):
+            alert = ("⛔ <b>LLM not authenticated</b> — triage stopped. Set "
+                     "CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) and redeploy.")
+        elif result.get("budget_hit"):
+            alert = ("⛔ <b>LLM budget / rate limit hit</b> — triage stopped after "
+                     f"{result['totals']['scored']} scored. Check usage.")
+        if alert:  # surface the stop reason to the phone
             try:
                 cid = notify.chat_id()
                 if cid:
-                    notify.send_message(
-                        cid,
-                        "⛔ <b>LLM budget / rate limit hit</b> — triage stopped after "
-                        f"{result['totals']['scored']} scored. Check usage.",
-                    )
+                    notify.send_message(cid, alert)
             except Exception:
                 pass  # a Telegram hiccup must not affect the run
     except Exception as exc:  # never crash the server — log the full traceback

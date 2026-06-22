@@ -28,6 +28,15 @@ services:
       - JOB_RADAR_API_TOKEN=${JOB_RADAR_API_TOKEN}
       - SCAN_HOURS=${SCAN_HOURS:-7-19/2}
       - TZ=${TZ:-Europe/London}
+      # LLM triage (Stage 1). claude-cli engine (default) uses your Pro sub via the
+      # `claude` CLI — mint with `claude setup-token`. The CLI reads this env var
+      # itself; our Python only spawns it. Without this passthrough the container
+      # has no token and `claude -p` returns "Not logged in".
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # only needed if you set analysis.engine: api (pay-per-token):
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # nightly triage schedule (cron hour); unset = manual only (not wired yet):
+      - ANALYZE_HOURS=${ANALYZE_HOURS:-}
       # Telegram (optional): notifications + interactive bot. All three = bot;
       # just TOKEN + CHAT_ID = notifications only.
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
