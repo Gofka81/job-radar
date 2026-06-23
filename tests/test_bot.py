@@ -42,19 +42,52 @@ def test_jobs_first_page(db, sent):
     bot.handle_update(_msg("/jobs"), db)
     assert len(sent["send"]) == 1
     _, text, markup = sent["send"][0]
-    assert "Active jobs" in text and "(12)" in text and "page 1/2" in text
-    btns = markup["inline_keyboard"][0]
-    assert [b["callback_data"] for b in btns] == ["jobs:1"]  # Next only on page 1
+    assert "New jobs" in text and "(12)" in text and "page 1/2" in text
+    kb = markup["inline_keyboard"]
+    assert [b["callback_data"] for b in kb[0]] == ["jobs:new:1"]  # Next only on page 1
+    assert any(b["callback_data"] == "act:analyze" for b in kb[1])  # action row present
 
 
 def test_pagination_callback_edits_to_page_2(db, sent):
-    cq = {"callback_query": {"id": "c1", "from": {"id": ME}, "data": "jobs:1",
+    cq = {"callback_query": {"id": "c1", "from": {"id": ME}, "data": "jobs:new:1",
                              "message": {"chat": {"id": ME}, "message_id": 5}}}
     bot.handle_update(cq, db)
     assert sent["answer"] == ["c1"]
     mid, text, markup = sent["edit"][0]
     assert mid == 5 and "page 2/2" in text
-    assert [b["callback_data"] for b in markup["inline_keyboard"][0]] == ["jobs:0"]  # Prev only
+    assert [b["callback_data"] for b in markup["inline_keyboard"][0]] == ["jobs:new:0"]  # Prev only
+
+
+def test_top_shows_only_scored_with_reason(db, sent):
+    from job_radar.store import Store
+    s = Store(db)
+    jid = s.list_jobs()[0]["job_id"]
+    s.apply_analysis(jid, score=9, reason="great fit", engine="claude-cli:x")
+    s.close()
+    bot.handle_update(_msg("/top"), db)
+    _, text, _ = sent["send"][0]
+    assert "Top scored" in text and "(1)" in text  # only the scored one
+    assert "9/10" in text and "great fit" in text   # score + AI reason shown
+
+
+def test_jobs_search_filters(db, sent):
+    bot.handle_update(_msg("/jobs Engineer 5"), db)  # matches only "Data Engineer 5"
+    _, text, _ = sent["send"][0]
+    assert "Search" in text and "(1)" in text
+
+
+def test_analyze_command_triggers(db, sent):
+    fired = []
+    bot.handle_update(_msg("/analyze"), db, analyze_fn=lambda: fired.append(1))
+    assert fired == [1] and "triage started" in sent["send"][0][1].lower()
+
+
+def test_analyze_button_callback_triggers(db, sent):
+    fired = []
+    cq = {"callback_query": {"id": "c2", "from": {"id": ME}, "data": "act:analyze",
+                             "message": {"chat": {"id": ME}, "message_id": 7}}}
+    bot.handle_update(cq, db, analyze_fn=lambda: fired.append(1))
+    assert fired == [1]
 
 
 def test_funnel(db, sent):

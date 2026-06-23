@@ -132,6 +132,12 @@ class ResultsPayload(BaseModel):
     results: list[Verdict] = Field(default_factory=list)
 
 
+class StatusUpdate(BaseModel):
+    # Apply-tracking from the dashboard: set ONLY the workflow status of one job.
+    job_id: str
+    status: str
+
+
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token gate. Fails closed: if no token is configured on the
     server the endpoint refuses rather than serving open to the internet."""
@@ -182,6 +188,22 @@ def create_app(db_path: str | None = None) -> FastAPI:
     @app.get("/api/funnel")
     def funnel(_: None = Depends(require_token), store: Store = Depends(get_store)) -> dict:
         return store.funnel()
+
+    @app.post("/api/status")
+    def set_status(
+        body: StatusUpdate,
+        _: None = Depends(require_token),
+        store: Store = Depends(get_store),
+    ) -> dict:
+        """Apply-tracking: set a single job's status (applied/viewed/…) from the
+        dashboard. Updates status ONLY — never touches the AI score/reason."""
+        try:
+            ok = store.set_status(body.job_id, body.status)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if not ok:
+            raise HTTPException(404, "unknown job_id")
+        return {"updated": True, "status": body.status}
 
     @app.get("/api/jobs")
     def jobs(
@@ -290,7 +312,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
         def _trigger_scan() -> None:
             threading.Thread(target=_guarded_scan, args=(db,), daemon=True).start()
 
-        bot.handle_update(update, db, scan_fn=_trigger_scan)
+        def _trigger_analyze() -> None:  # triage all pending (only-untriaged, max_jobs-capped)
+            threading.Thread(
+                target=_guarded_analyze, args=(db, None, True), daemon=True
+            ).start()
+
+        bot.handle_update(update, db, scan_fn=_trigger_scan, analyze_fn=_trigger_analyze)
         return {"ok": True}
 
     return app

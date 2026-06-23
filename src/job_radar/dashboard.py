@@ -72,6 +72,25 @@ DASHBOARD_HTML = """<!doctype html>
   table.usage th, table.usage td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
   table.usage th { color:var(--muted); font-weight:600; }
   .warn { color:#ff6b6b; font-weight:700; }
+  /* apply-tracking modal */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.62); z-index:50;
+           display:flex; align-items:center; justify-content:center; padding:16px; }
+  .modal-card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+                padding:18px; width:100%; max-width:380px; }
+  .modal-title { font-size:17px; font-weight:700; margin-bottom:6px; }
+  .modal-actions { display:flex; flex-direction:column; gap:8px; margin-top:16px; }
+  .modal-actions button { width:100%; min-height:46px; font-size:15px; }
+  .modal-actions .primary { background:var(--accent); color:#fff; border-color:var(--accent);
+                            font-weight:700; }
+  .modal-actions .ghost { background:transparent; color:var(--muted); }
+  /* mobile: header must not become a tall sticky block that hides the list */
+  @media (max-width:600px) {
+    header { position:static; padding:10px 12px; gap:8px; }
+    h1 { flex:1 1 100%; font-size:16px; white-space:nowrap; }
+    #jobsTools, #nav { display:flex; flex-wrap:wrap; gap:6px; }
+    header button, header select { padding:6px 10px; font-size:13px; min-height:34px; }
+    .wrap { padding:12px; }
+  }
 </style>
 </head>
 <body>
@@ -79,10 +98,10 @@ DASHBOARD_HTML = """<!doctype html>
   <h1>📡 job-radar</h1>
   <span id="jobsTools">
     <select id="sort">
+      <option value="score" selected>Score</option>
       <option value="recent">Recent</option>
       <option value="company">Company</option>
       <option value="location">Location</option>
-      <option value="score">Score</option>
     </select>
     <button id="scan">Scan now</button>
     <button id="analyze" title="LLM triage of pending jobs">✨ Analyze</button>
@@ -159,6 +178,18 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </div>
 </div>
+
+<div id="applyModal" class="modal" style="display:none">
+  <div class="modal-card">
+    <div class="modal-title">Did you apply?</div>
+    <div id="applyJob" class="muted"></div>
+    <div class="modal-actions">
+      <button id="amApplied" class="primary">✅ Applied</button>
+      <button id="amViewed">👀 Just viewed</button>
+      <button id="amDismiss" class="ghost">✕ Not now</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 let TOKEN = localStorage.getItem("jr_token") || "";
@@ -209,10 +240,12 @@ function viewJobs() {
     (!minSal || j.salary_max == null || j.salary_max >= minSal) &&
     (SHOW_ALL || !j.first_seen || (now - new Date(j.first_seen).getTime()) <= RECENT_MS));
   const k = $("#sort").value;
-  const by = { recent:(a,b)=> (b.first_seen||"").localeCompare(a.first_seen||""),
+  const recent = (a,b)=> (b.first_seen||"").localeCompare(a.first_seen||"");
+  const by = { recent,
                company:(a,b)=> (a.company||"").localeCompare(b.company||""),
                location:(a,b)=> primaryLoc(a).localeCompare(primaryLoc(b)),
-               score:(a,b)=> (b.score||0)-(a.score||0) };
+               // highest score first; unscored (null) sink to the bottom; ties → newest
+               score:(a,b)=> ((b.score??-1)-(a.score??-1)) || recent(a,b) };
   v.sort(by[k]);
   render(v);
   const older = SHOW_ALL ? 0 : JOBS.filter(j => j.first_seen && (now - new Date(j.first_seen).getTime()) > RECENT_MS).length;
@@ -234,10 +267,12 @@ function render(list) {
     const sal = salaryStr(j);
     const hasScore = j.score != null;
     const band = scoreBand(j.score);
+    const fresh = j.first_seen && (Date.now()-new Date(j.first_seen).getTime() < 86400000);
     return `<div class="job${band ? " sb-"+band : ""}">
       <div class="jobhead">
         ${hasScore ? `<span class="score s-${band}">${Math.round(j.score)}</span>` : ""}
-        <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+        <a class="joblink" data-jid="${esc(j.job_id)}" href="${esc(j.url)}"
+           target="_blank" rel="noopener">${esc(j.title)}</a>
         <button class="mini" data-jid="${esc(j.job_id)}"
           title="${hasScore ? "Re-score" : "Score"} this job (1 Claude call)">✨</button>
       </div>
@@ -248,6 +283,7 @@ function render(list) {
         <span class="pill">${esc(j.source)}</span>
         ${j.status && j.status !== "new" ? `<span class="pill">${esc(j.status)}</span>` : ""}
         <span class="muted">${ago(j.first_seen)}</span>
+        ${fresh ? '<span class="pill new">NEW</span>' : ""}
       </div>
       ${j.eval_reason ? `<div class="reason">${esc(j.eval_reason)}</div>` : ""}
     </div>`;
@@ -419,6 +455,57 @@ $("#scan").onclick = async () => {
     $("#msg").textContent = r.status===409 ? "A scan is already running…" : "Scan started — refresh in a bit.";
   } catch(e){}
 };
+// --- apply tracking -------------------------------------------------------
+// When a job link is opened, remember it; when the user returns to this tab,
+// ask whether they applied. Works on PC (new tab) and mobile (app switch) via
+// the visibilitychange event, with a focus fallback.
+let pendingApply = null;
+function setPending(p) {  // persist so a same-tab navigation (mobile) survives reload
+  pendingApply = p;
+  try { p ? localStorage.setItem("jr_pending", JSON.stringify({...p, ts:Date.now()}))
+          : localStorage.removeItem("jr_pending"); } catch(e){}
+}
+(function restorePending(){
+  try {
+    const p = JSON.parse(localStorage.getItem("jr_pending") || "null");
+    if (p && Date.now() - (p.ts||0) < 1800000) pendingApply = p;  // 30-min window
+    else localStorage.removeItem("jr_pending");
+  } catch(e){}
+})();
+$("#list").onclick = (e) => {
+  const b = e.target.closest("button.mini");
+  if (b && b.dataset.jid) { triage([b.dataset.jid]); return; }
+  const a = e.target.closest("a.joblink");
+  if (a && a.dataset.jid) {
+    const j = JOBS.find(x => x.job_id === a.dataset.jid);
+    if (j) setPending({ jid: j.job_id, co: j.company, ti: j.title });
+    // don't preventDefault — let the link open
+  }
+};
+function showApplyModal() {
+  if (!pendingApply || $("#applyModal").style.display === "flex") return;
+  $("#applyJob").textContent = (pendingApply.co || "") + " — " + (pendingApply.ti || "");
+  $("#applyModal").style.display = "flex";
+}
+function closeApplyModal() { $("#applyModal").style.display = "none"; setPending(null); }
+async function markStatus(jid, status) {
+  try {
+    await api("/api/status", { method:"POST", headers:{ "content-type":"application/json" },
+      body: JSON.stringify({ job_id: jid, status }) });
+    $("#msg").textContent = status === "applied" ? "✅ Marked as applied." : "👀 Marked as viewed.";
+    fetchJobs();  // refresh so the status pill updates
+  } catch(e){}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") showApplyModal();
+});
+window.addEventListener("focus", showApplyModal);  // fallback for browsers that skip the above
+$("#amApplied").onclick = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "applied"); };
+$("#amViewed").onclick  = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "viewed"); };
+$("#amDismiss").onclick = closeApplyModal;
+$("#applyModal").onclick = (e) => { if (e.target.id === "applyModal") closeApplyModal(); };  // tap backdrop
+
+if (pendingApply) setTimeout(showApplyModal, 500);  // restored from a same-tab return
 $("#analyze").onclick = () => {
   // count untriaged pending so we can warn before firing a big batch (each = 1
   // Claude call against your Pro quota; the server also caps at analysis.max_jobs).

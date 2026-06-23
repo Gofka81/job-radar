@@ -258,6 +258,21 @@ class Store:
         )
         return True
 
+    # Statuses the dashboard can set directly (apply-tracking). 'viewed' = opened
+    # but not applied; 'applied' = applied. Kept narrow so a typo can't invent lanes.
+    SETTABLE_STATUSES = ("new", "viewed", "applied", "rejected", "archived")
+
+    def set_status(self, job_id: str, status: str) -> bool:
+        """Update ONLY the workflow status (apply-tracking from the dashboard).
+        Leaves score/eval_reason/report_num intact — unlike mark_results, which is
+        the PC verdict path. Returns False if the job_id is unknown."""
+        if status not in self.SETTABLE_STATUSES:
+            raise ValueError(f"status must be one of {self.SETTABLE_STATUSES}")
+        if not self.con.execute("SELECT 1 FROM jobs WHERE job_id = ?", [job_id]).fetchone():
+            return False
+        self.con.execute("UPDATE jobs SET status = ? WHERE job_id = ?", [status, job_id])
+        return True
+
     LIST_COLS = (
         "job_id", "source", "company", "title", "url", "location", "locations",
         "status", "score", "eval_reason", "salary_min", "salary_max", "currency",

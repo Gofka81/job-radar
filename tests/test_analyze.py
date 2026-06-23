@@ -47,6 +47,21 @@ def test_apply_analysis_unknown_job_returns_false(tmp_path):
     s.close()
 
 
+def test_set_status_preserves_score_and_reason(tmp_path):
+    db = tmp_path / "a.duckdb"
+    jid = _seed(db, 1)[0]
+    s = Store(db)
+    s.apply_analysis(jid, score=8, reason="fit", engine="claude-cli:x")
+    assert s.set_status(jid, "applied") is True        # apply-tracking
+    row = s.list_jobs()[0]
+    assert row["status"] == "applied"                  # status changed…
+    assert row["score"] == 8 and row["eval_reason"] == "fit"  # …score/reason intact
+    assert s.set_status("nope", "applied") is False    # unknown job
+    with pytest.raises(ValueError):
+        s.set_status(jid, "garbage")                   # not a settable status
+    s.close()
+
+
 def test_jobs_for_analysis_skips_already_triaged(tmp_path):
     db = tmp_path / "a.duckdb"
     ids = _seed(db, 2)

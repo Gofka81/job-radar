@@ -65,6 +65,18 @@ def test_results_roundtrip_marks_evaluated(client):
     assert c.get("/api/funnel").json().get("applied") == 1
 
 
+def test_status_endpoint_tracks_apply(client):
+    c, jid = client
+    r = c.post("/api/status", json={"job_id": jid, "status": "applied"})
+    assert r.status_code == 200 and r.json() == {"updated": True, "status": "applied"}
+    jobs = c.get("/api/jobs").json()["jobs"]
+    assert next(j for j in jobs if j["job_id"] == jid)["status"] == "applied"
+    assert c.post("/api/status", json={"job_id": "nope", "status": "applied"}).status_code == 404
+    assert c.post("/api/status", json={"job_id": jid, "status": "weird"}).status_code == 400  # bad status
+    assert c.post("/api/status", json={"job_id": jid, "status": "viewed"},
+                  headers={"authorization": "x"}).status_code == 401
+
+
 def test_results_requires_token(client):
     c, jid = client
     r = c.post(
