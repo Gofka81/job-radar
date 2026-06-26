@@ -52,8 +52,13 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
             for page in range(max_pages):
                 offset = page * _PAGE
                 kw = f',keyword="{q}"' if q else ""
+                # sortBy=RELEVANCY, NOT POSTING_DATES_DESC: Oracle's keyword match is
+                # very loose (a big tenant returns 1000+ hits for "data platform"), so
+                # date-sorting + a small page window only ever shows the newest-globally
+                # slice (mostly out-of-scope US/India roles) and buries real title-matches
+                # like JPMorgan's London "Cloud Data Platform Software Engineer II".
                 finder = (f"findReqs;siteNumber={site}{kw},"
-                          f"limit={_PAGE},offset={offset},sortBy=POSTING_DATES_DESC")
+                          f"limit={_PAGE},offset={offset},sortBy=RELEVANCY")
                 try:
                     resp = http.get(base, headers={"accept": "application/json"}, params={
                         "onlyData": "true",

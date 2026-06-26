@@ -37,6 +37,11 @@ def test_dashboard_served_open_at_root(tmp_path):
     assert "text/html" in r.headers["content-type"]
     assert "job-radar" in r.text
     assert "configView" in r.text and "cfgSave" in r.text  # config editor tab present
+    # honest status filter (idea 1): explicit sets, no misleading "All statuses" default
+    assert "All statuses" not in r.text
+    assert 'value="inbox" selected' in r.text
+    for opt in ("STATUS_SETS", '"applied"', '"rejected"', '"archived"'):
+        assert opt in r.text
 
 
 def test_jobs_endpoint_includes_salary(client):

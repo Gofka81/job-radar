@@ -180,6 +180,7 @@ def test_oracle_emits_job_per_location_with_snippet():
     assert j.description == "Build Spark pipelines." and str(j.posted_at) == "2026-06-15"
     finder = route.calls[0].request.url.params.get("finder")
     assert "siteNumber=CX_1001" in finder and 'keyword="data engineer"' in finder
+    assert "sortBy=RELEVANCY" in finder  # loose keyword → relevance, not date (see oracle.py)
 
 
 @respx.mock

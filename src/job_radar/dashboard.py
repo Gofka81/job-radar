@@ -34,6 +34,7 @@ DASHBOARD_HTML = """<!doctype html>
   .job.sb-hi  { border-left-color:#2ecc71; }
   .job.sb-mid { border-left-color:#f1c40f; }
   .job.sb-lo  { border-left-color:#e74c3c; }
+  .job.seen { opacity:.5; }   /* 'viewed' = a dim marker, still in the inbox */
   .job a { color:var(--fg); text-decoration:none; font-weight:600; font-size:15px; }
   .job a:hover { color:var(--accent); }
   .jobhead { display:flex; gap:10px; align-items:flex-start; justify-content:space-between; }
@@ -131,7 +132,13 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="chips" class="chips"></div>
     <div class="controls">
       <input id="q" placeholder="Search title / company / JD — e.g. spark, airflow" autocomplete="off">
-      <select id="fstatus"><option value="">All statuses</option></select>
+      <select id="fstatus">
+        <option value="inbox" selected>Inbox</option>
+        <option value="applied">Applied</option>
+        <option value="rejected">Rejected</option>
+        <option value="archived">Archived</option>
+        <option value="all">All</option>
+      </select>
       <select id="floc"><option value="">All locations</option></select>
       <select id="fsource"><option value="">All sources</option></select>
       <input id="fsalary" type="number" min="0" step="5000" placeholder="Min £" inputmode="numeric">
@@ -150,9 +157,9 @@ DASHBOARD_HTML = """<!doctype html>
     <div id="trkChips" class="chips"></div>
     <div id="trkBox"></div>
     <div class="muted" style="font-size:12px;margin-top:6px;">
-      Your pipeline. Applied jobs move here out of the Jobs inbox; use the buttons to
-      change stage. Hidden (dismissed) jobs aren’t shown — pick “archived” in the Jobs
-      status filter to find them.
+      Your real pipeline: Applied + Rejected. Applying to a job moves it here out of the
+      inbox; use the buttons to change stage. Seen-but-not-applied jobs stay in the inbox
+      (dimmed); hidden ones are under “Archived” in the Jobs status filter.
     </div>
   </div>
 
@@ -238,6 +245,15 @@ function showAuth(m){ $("#auth").style.display="flex"; $("#msg").textContent=m||
 const RECENT_MS = 48*3600*1000;   // "recent" default window
 let SHOW_ALL = false;             // recency toggle (off = recent only)
 
+// Explicit, honest status filter sets (predicate over a job's status).
+const STATUS_SETS = {
+  inbox:    s => s === "new" || s === "viewed",
+  applied:  s => s === "applied",
+  rejected: s => s === "rejected",
+  archived: s => s === "archived",
+  all:      () => true,
+};
+
 // One posting can list several cities (locations[], stored priority-first by the
 // server). Show the first as the preview chip + "+N" so Edinburgh is never hidden.
 function primaryLoc(j){ const l=j.locations||[]; return l[0] || j.location || "—"; }
@@ -252,20 +268,20 @@ function fillFilter(sel, label, values) {
 function viewJobs() {
   // Text search (#q) is server-side (it matches the JD too) — see fetchJobs().
   // The rest filter the loaded set client-side for instant response.
-  const st = $("#fstatus").value, loc = $("#floc").value, src = $("#fsource").value;
+  const st = $("#fstatus").value || "inbox", loc = $("#floc").value, src = $("#fsource").value;
   const minSal = parseFloat($("#fsalary").value) || 0;
   const now = Date.now();
-  // Inbox = jobs still to review (status 'new'). Anything you've acted on — saved
-  // (viewed), applied, rejected — lives in the 📌 Tracker; archived is hidden.
-  const HIDE_INBOX = ["viewed", "applied", "rejected", "archived"];
+  // Honest status sets: Inbox = still to review (new) + seen-but-not-acted (viewed,
+  // shown dimmed). Applied/Rejected/Archived show exactly that set; All shows everything.
+  const inSet = STATUS_SETS[st] || STATUS_SETS.inbox;
   let v = JOBS.filter(j =>
-    // an explicit status filter shows exactly that; otherwise show only the inbox
-    (st ? j.status === st : !HIDE_INBOX.includes(j.status)) &&
+    inSet(j.status) &&
     (!loc || (j.locations || []).includes(loc)) &&
     (!src || j.source === src) &&
     // min salary on salary_max; keep jobs with no salary data visible
     (!minSal || j.salary_max == null || j.salary_max >= minSal) &&
-    (st || SHOW_ALL || !j.first_seen ||
+    // recency only narrows the inbox; the curated pipeline views show their full set
+    (st !== "inbox" || SHOW_ALL || !j.first_seen ||
      (now - new Date(j.first_seen).getTime()) <= RECENT_MS));
   const k = $("#sort").value;
   const recent = (a,b)=> (b.first_seen||"").localeCompare(a.first_seen||"");
@@ -276,10 +292,13 @@ function viewJobs() {
                score:(a,b)=> ((b.score??-1)-(a.score??-1)) || recent(a,b) };
   v.sort(by[k]);
   render(v);
-  const older = SHOW_ALL ? 0 : JOBS.filter(j => j.first_seen && (now - new Date(j.first_seen).getTime()) > RECENT_MS).length;
+  const older = (SHOW_ALL || st !== "inbox") ? 0 : JOBS.filter(j =>
+    STATUS_SETS.inbox(j.status) && j.first_seen &&
+    (now - new Date(j.first_seen).getTime()) > RECENT_MS).length;
   $("#recency").textContent = SHOW_ALL ? "All" : `Recent${older?` (+${older})`:""}`;
   $("#recency").classList.toggle("on", !SHOW_ALL);
-  $("#msg").textContent = `${v.length} of ${JOBS.length} jobs` + (SHOW_ALL ? "" : " · recent 48h");
+  const recentSuffix = (st === "inbox" && !SHOW_ALL) ? " · recent 48h" : "";
+  $("#msg").textContent = `${v.length} of ${JOBS.length} jobs` + recentSuffix;
 }
 function salaryStr(j) {
   const k = n => "£" + Math.round(n/1000) + "k";
@@ -296,7 +315,8 @@ function render(list) {
     const hasScore = j.score != null;
     const band = scoreBand(j.score);
     const fresh = j.first_seen && (Date.now()-new Date(j.first_seen).getTime() < 86400000);
-    return `<div class="job${band ? " sb-"+band : ""}">
+    const seen = j.status === "viewed" ? " seen" : "";
+    return `<div class="job${band ? " sb-"+band : ""}${seen}">
       <div class="jobhead">
         ${hasScore ? `<span class="score s-${band}">${Math.round(j.score)}</span>` : ""}
         <a class="joblink" data-jid="${esc(j.job_id)}" href="${esc(j.url)}"
@@ -326,7 +346,6 @@ async function fetchJobs() {
   const q = $("#q").value.trim();
   const url = "/api/jobs?limit=500" + (q ? "&q=" + encodeURIComponent(q) : "");
   JOBS = (await (await api(url)).json()).jobs || [];
-  fillFilter($("#fstatus"), "All statuses", JOBS.map(j => j.status));
   fillFilter($("#floc"), "All locations", JOBS.flatMap(j => j.locations || []));
   fillFilter($("#fsource"), "All sources", JOBS.map(j => j.source));
   viewJobs();
@@ -400,7 +419,6 @@ async function saveRubric() {
 // the server's SETTABLE_STATUSES allowlist.
 const STAGES = [
   { key: "applied",  label: "✅ Applied",  moves: [["rejected","🚫 Rejected"], ["new","↩ Back to review"]] },
-  { key: "viewed",   label: "👀 Saved",    moves: [["applied","✅ Applied"], ["archived","✕ Hide"]] },
   { key: "rejected", label: "🚫 Rejected", moves: [["new","↩ Back to review"]] },
 ];
 function trackerCard(j, moves) {
@@ -581,7 +599,7 @@ function showApplyModal() {
   $("#applyModal").style.display = "flex";
 }
 function closeApplyModal() { $("#applyModal").style.display = "none"; setPending(null); }
-const STATUS_MSG = { applied:"✅ Applied → see the 📌 Tracker", viewed:"👀 Saved to 📌 Tracker",
+const STATUS_MSG = { applied:"✅ Applied → see the 📌 Tracker", viewed:"👀 Marked seen — stays in your inbox, dimmed",
   rejected:"🚫 Rejected", archived:"🚫 Hidden (pick ‘archived’ in the status filter to find it)",
   new:"↩ Back in the review list" };
 async function markStatus(jid, status) {
