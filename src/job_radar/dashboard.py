@@ -153,6 +153,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           display:inline-flex; align-items:center; justify-content:center; }
   .mini:hover { border-color:var(--accent); color:var(--fg); }
   .mini.dismiss:hover { border-color:var(--danger); color:var(--danger); }
+  .mini.spin { color:var(--accent); cursor:default; animation:pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{ opacity:.35 } 50%{ opacity:1 } }
   .meta { color:var(--muted); font-size:13px; margin-top:7px; display:flex; gap:7px;
           flex-wrap:wrap; align-items:center; }
   .meta .co { font-weight:600; color:var(--fg); }
@@ -487,8 +489,10 @@ function render(list) {
         <a class="joblink" data-jid="${esc(j.job_id)}" href="${esc(j.url)}"
            target="_blank" rel="noopener">${esc(j.title)}</a>
         <span class="cardacts">
-          <button class="mini" data-jid="${esc(j.job_id)}"
-            title="${hasScore ? "Re-score" : "Score"} this job (1 Claude call)">✨</button>
+          ${SPIN.has(j.job_id)
+            ? `<button class="mini spin" disabled title="Queued for scoring…">⏳</button>`
+            : `<button class="mini" data-jid="${esc(j.job_id)}"
+                 title="${hasScore ? "Re-score" : "Score"} this job (1 Claude call)">✨</button>`}
           ${j.status === "archived"
             ? `<button class="mini" data-restore="${esc(j.job_id)}" title="Restore to review">↩</button>`
             : `<button class="mini dismiss" data-dismiss="${esc(j.job_id)}" title="Not interested — hide">✕</button>`}
@@ -520,6 +524,11 @@ async function fetchJobs() {
   const q = $("#q").value.trim();
   const url = "/api/jobs?limit=500" + (q ? "&q=" + encodeURIComponent(q) : "");
   JOBS = (await (await api(url)).json()).jobs || [];
+  // a spinning single is done once its score differs from the baseline (or it's gone)
+  for (const [jid, base] of SPIN) {
+    const j = JOBS.find(x => x.job_id === jid);
+    if (!j || j.score !== base) SPIN.delete(jid);
+  }
   fillFilter($("#floc"), "All", JOBS.flatMap(j => j.locations || []));
   fillFilter($("#fsource"), "All", JOBS.map(j => j.source));
   viewJobs();
@@ -531,6 +540,7 @@ async function load() {
     FUNNEL = await (await api("/api/funnel")).json();
     renderLanes();
     await fetchJobs();
+    syncTriage();  // restore progress line + button state if a run is in flight
   } catch(e){ if (e.message!=="auth") $("#msg").textContent = "Error: "+e.message; }
 }
 
@@ -670,21 +680,53 @@ async function loadUsage() {
   } catch(e){ if (e.message!=="auth") $("#useMsg").textContent = "Error: "+e.message; }
 }
 
-// --- triage (✨ Analyze) ---
-async function triage(target) {
+// --- triage queue (✨ Analyze) ---
+// Batch (Analyze button) and per-card ✨ both POST here; the server QUEUES them
+// (one worker, one at a time). SPIN tracks which single job_ids are in flight so
+// their card ✨ shows a spinner; the batch button is disabled while a batch is queued.
+const SPIN = new Map();     // job_id -> baseline score; cleared when a new score lands
+let POLL = null;            // active status poller (null when idle)
+async function enqueueTriage(target) {
   try {
     const r = await api("/api/analyze", {
       method:"POST", headers:{ "content-type":"application/json" },
       body: JSON.stringify({ mode:"triage", target }) });
-    if (r.status===409) { $("#msg").textContent = "Triage already running…"; return; }
-    $("#msg").textContent = "✨ Triage started…";
-    pollAnalyze();
-  } catch(e){}
+    if (r.status===409) { $("#msg").textContent = "Triage queue is full — try again shortly."; return null; }
+    return await r.json().catch(()=>({}));
+  } catch(e){ return null; }
 }
-async function pollAnalyze() {
+function startPoll(){ if (!POLL) pollAnalyze(); }
+async function syncTriage() {  // on load: reflect any in-flight run without an extra jobs fetch when idle
   try {
     const s = await (await api("/api/analyze")).json();
-    if (s.running) { $("#msg").textContent = "✨ Triage running…"; setTimeout(pollAnalyze, 2000); return; }
+    setBatchBusy(!!s.batch_active);
+    if (s.running || s.queued) startPoll();
+  } catch(e){}
+}
+function setBatchBusy(busy){
+  const b = $("#analyze");
+  b.disabled = busy; b.style.opacity = busy ? .55 : "";
+  b.style.cursor = busy ? "default" : "";
+}
+async function pollAnalyze() {
+  POLL = true;
+  try {
+    const s = await (await api("/api/analyze")).json();
+    const c = s.current, q = s.queued||0;
+    setBatchBusy(!!s.batch_active);
+    // live progress line
+    if (s.running && c) {
+      const what = c.kind==="batch" ? "Triaging" : "Scoring";
+      const tot = c.total==null ? "…" : c.total;
+      $("#msg").textContent = `✨ ${what} ${c.scored||0}/${tot}`
+        + (c.errors ? ` (${c.errors} err)` : "") + (q ? ` · ${q} queued` : "");
+    } else if (q) {
+      $("#msg").textContent = `✨ ${q} queued…`;
+    }
+    await fetchJobs();  // reflect new scores + clear finished spinners (see render/SPIN)
+    if (s.running || q) { POLL = setTimeout(pollAnalyze, 1500); return; }
+    // idle: queue drained — settle the message from the last run
+    POLL = null; setBatchBusy(false);
     const last = s.last || {};
     if (last.auth_failed)
       $("#msg").innerHTML = '<span class="warn">⛔ Claude not logged in — set '
@@ -692,9 +734,8 @@ async function pollAnalyze() {
     else if (last.budget_hit)
       $("#msg").innerHTML = '<span class="warn">⛔ Out of budget / rate limited — triage stopped.</span>';
     else if (last.totals)
-      $("#msg").textContent = `✨ Triage done — scored ${last.totals.scored} (${last.totals.errors||0} err)`;
-    fetchJobs();
-  } catch(e){}
+      $("#msg").textContent = `✨ Done — scored ${last.totals.scored} (${last.totals.errors||0} err)`;
+  } catch(e){ POLL = null; }
 }
 
 // --- wiring ---
@@ -752,7 +793,13 @@ $("#list").onclick = (e) => {
   const d = e.target.closest("button.dismiss");
   if (d && d.dataset.dismiss) { markStatus(d.dataset.dismiss, "archived"); return; }  // ✕ hide
   const b = e.target.closest("button.mini");
-  if (b && b.dataset.jid) { triage([b.dataset.jid]); return; }                        // ✨ score
+  if (b && b.dataset.jid) {                                                           // ✨ score (queued)
+    const jid = b.dataset.jid, j = JOBS.find(x => x.job_id === jid);
+    SPIN.set(jid, j ? j.score : null);           // baseline; spinner until score changes
+    viewJobs();                                   // instant spinner feedback
+    enqueueTriage([jid]).then(d => { if (!d || (!d.queued && !d.duplicate)) SPIN.delete(jid); startPoll(); });
+    return;
+  }
   const a = e.target.closest("a.joblink");
   if (a && a.dataset.jid) {  // opening a job → remember it so we can ask on return
     const j = JOBS.find(x => x.job_id === a.dataset.jid);
@@ -788,7 +835,8 @@ $("#amDismiss").onclick = closeApplyModal;
 $("#applyModal").onclick = (e) => { if (e.target.id === "applyModal") closeApplyModal(); };  // tap backdrop
 
 if (pendingApply) setTimeout(showApplyModal, 500);  // restored from a same-tab return
-$("#analyze").onclick = () => {
+$("#analyze").onclick = async () => {
+  if ($("#analyze").disabled) return;   // a batch is already queued/running
   // count untriaged new jobs so we can warn before firing a big batch (each = 1
   // Claude call against your Pro quota; the server also caps at analysis.max_jobs).
   const pending = JOBS.filter(j => j.status==="new" && j.score==null).length;
@@ -796,7 +844,10 @@ $("#analyze").onclick = () => {
   if (pending > 10 && !confirm(
       `Triage ${pending} new jobs? That's up to ${pending} Claude calls against your `
       + `Pro quota (capped by analysis.max_jobs). Use a card's ✨ for one at a time.`)) return;
-  triage("all_pending");
+  setBatchBusy(true);                   // block the button immediately
+  const d = await enqueueTriage("all_pending");
+  if (d && (d.queued || d.duplicate)) { $("#msg").textContent = "✨ Batch queued…"; startPoll(); }
+  else setBatchBusy(false);             // enqueue failed (queue full) — unblock
 };
 renderLanes();
 load();

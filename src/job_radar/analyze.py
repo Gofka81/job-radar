@@ -234,12 +234,19 @@ def run_analyze(
     job_ids: list[str] | None = None,
     only_untriaged: bool = True,
     log=None,
+    progress=None,
 ) -> dict:
     """Triage pending jobs and write score + reason back. Mirrors run_scan's
     shape: short per-job DB locks, never raises on one bad job (logs + continues,
-    connector-style). `job_ids` targets a specific set; otherwise all pending."""
+    connector-style). `job_ids` targets a specific set; otherwise all pending.
+
+    `progress(scored, errors, total)` — optional callback fired at start and after
+    every job, so the server's queue worker can surface live progress (e.g. 4/12)."""
     if log is None:
         log = logger.info
+    def _report():
+        if progress:
+            progress(totals["scored"], totals["errors"], totals["jobs"])
     acfg = cfg.get("analysis") or {}
     model = acfg.get("model") or DEFAULT_MODEL
     max_jobs = int(acfg.get("max_jobs", 200))  # cost ceiling: hard cap on calls/run
@@ -272,6 +279,7 @@ def run_analyze(
     results: list[dict] = []
     budget_hit = False
     auth_failed = False
+    _report()  # emit total up-front so the UI can show 0/N immediately
     for job in jobs:
         try:
             tri, u = (_score_cli(model, rubric, job) if use_cli
@@ -297,6 +305,7 @@ def run_analyze(
                 break
             log(f"  ✗ {job.get('company')} | {job.get('title')}: {exc}")  # one bad job
             totals["errors"] += 1
+            _report()
             continue
         job_cost = u.pop("cost_usd", None)  # CLI reports its own; API engine computes
         for k in usage:
@@ -306,6 +315,7 @@ def run_analyze(
         s.apply_analysis(job["job_id"], score=tri.score, reason=tri.reason, engine=engine)
         s.close()
         totals["scored"] += 1
+        _report()
         results.append({
             "job_id": job["job_id"], "company": job.get("company"),
             "title": job.get("title"), "score": tri.score, "reason": tri.reason,

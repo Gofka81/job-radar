@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -261,6 +262,38 @@ def client(tmp_path, monkeypatch):
     return c
 
 
+@pytest.fixture(autouse=True)
+def _reset_analyze_queue():
+    """The triage queue + worker are module-global; drain and reset their state
+    between tests so the shared worker can't leak tasks or dedup flags across tests."""
+    import job_radar.server as srv
+
+    def _reset():
+        with srv._analyze_lock:
+            while not srv._analyze_q.empty():
+                try:
+                    srv._analyze_q.get_nowait()
+                    srv._analyze_q.task_done()
+                except Exception:
+                    break
+            srv._queued_batch = False
+            srv._queued_singles.clear()
+            srv._analyze_state.update(running=False, current=None, last=None)
+
+    _reset()
+    yield
+    _reset()
+
+
+def _wait(pred, timeout=2.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def test_analyze_requires_token(client):
     assert client.post("/api/analyze", headers={"authorization": "x"}).status_code == 401
     assert client.get("/api/analyze", headers={"authorization": "x"}).status_code == 401
@@ -270,19 +303,19 @@ def test_analyze_rejects_non_triage_mode(client):
     assert client.post("/api/analyze", json={"mode": "deep"}).status_code == 400
 
 
-def test_analyze_now_triggers_run(client, monkeypatch):
+def test_analyze_batch_enqueues_and_runs(client, monkeypatch):
     import job_radar.server as srv
 
     calls = []
     monkeypatch.setattr(srv, "run_analyze",
                         lambda cfg, db, **k: calls.append(k) or {"totals": {"scored": 1}})
     r = client.post("/api/analyze", json={"mode": "triage", "target": "all_pending"})
-    assert r.status_code == 202 and r.json() == {"started": True}
-    for _ in range(100):
-        if calls:
-            break
-        time.sleep(0.02)
-    assert calls and calls[0]["only_untriaged"] is True
+    assert r.status_code == 202
+    body = r.json()
+    assert body["queued"] is True and body["kind"] == "batch"
+    assert _wait(lambda: bool(calls)), "worker never ran the task"
+    assert calls[0]["only_untriaged"] is True and calls[0]["job_ids"] is None
+    assert _wait(lambda: client.get("/api/analyze").json()["last"] is not None)
     assert client.get("/api/analyze").json()["last"]["totals"]["scored"] == 1
 
 
@@ -292,22 +325,42 @@ def test_analyze_target_job_ids_rescores(client, monkeypatch):
     calls = []
     monkeypatch.setattr(srv, "run_analyze", lambda cfg, db, **k: calls.append(k) or {})
     r = client.post("/api/analyze", json={"mode": "triage", "target": ["abc"]})
-    assert r.status_code == 202
-    for _ in range(100):
-        if calls:
-            break
-        time.sleep(0.02)
+    assert r.status_code == 202 and r.json()["kind"] == "single"
+    assert _wait(lambda: bool(calls))
     assert calls[0]["job_ids"] == ["abc"] and calls[0]["only_untriaged"] is False
 
 
-def test_analyze_409_when_already_running(client):
+def test_analyze_queue_dedups_batch_while_running(client, monkeypatch):
+    """A second batch, while one is queued/running, is a no-op dedup (not a new run)."""
     import job_radar.server as srv
 
-    srv._analyze_lock.acquire()
-    try:
-        assert client.post("/api/analyze", json={"mode": "triage"}).status_code == 409
-    finally:
-        srv._analyze_lock.release()
+    gate, started = threading.Event(), threading.Event()
+
+    def blocking(cfg, db, **k):
+        started.set()
+        gate.wait(2)
+        return {"totals": {"scored": 0}}
+
+    monkeypatch.setattr(srv, "run_analyze", blocking)
+    assert client.post("/api/analyze", json={"mode": "triage"}).json()["queued"] is True
+    assert started.wait(2), "worker never started the first batch"
+    dup = client.post("/api/analyze", json={"mode": "triage"}).json()
+    assert dup["queued"] is False and dup["duplicate"] is True
+    gate.set()  # let the first batch finish so the queue drains
+
+
+def test_analyze_dedups_same_single_job(client, monkeypatch):
+    """Two ✨ clicks on the same job while it's in flight enqueue only once."""
+    import job_radar.server as srv
+
+    gate, started = threading.Event(), threading.Event()
+    monkeypatch.setattr(srv, "run_analyze",
+                        lambda cfg, db, **k: (started.set(), gate.wait(2), {})[-1])
+    assert client.post("/api/analyze", json={"mode": "triage", "target": ["j1"]}).json()["queued"] is True
+    assert started.wait(2)
+    dup = client.post("/api/analyze", json={"mode": "triage", "target": ["j1"]}).json()
+    assert dup["queued"] is False and dup["duplicate"] is True
+    gate.set()
 
 
 # --- rubric endpoint -----------------------------------------------------
