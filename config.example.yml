@@ -132,6 +132,29 @@ sources:
     max_pages: 2
     results_per_page: 50
 
+  linkedin:
+    enabled: false             # LinkedIn public guest jobs endpoint (no login/cookie/
+                               # account → no ban risk, only per-IP rate limiting).
+                               # Run on the DEEP-scan cadence, not every 2h.
+    # queries are OR-joined into ONE boolean search per location (3 terms = 1 request);
+    # title_filter still trims post-fetch. Same array shape as the other sources.
+    queries: ["data engineer", "data platform", "analytics engineer"]
+    locations:                 # per-location passes; distance in MILES. where=""/geoId
+      - { where: "Edinburgh", distance: 40 }
+      - { where: "Glasgow",   distance: 40 }
+      - { where: "London",    distance: 25 }
+      - { where: "United Kingdom" }            # nationwide + remote catch-all
+    hours_old: 168             # f_TPR window (last N hours posted); the main page-cut.
+                               # Regular scans tighten this via recent_days×24 if set.
+    max_pages: 2               # start-paginated @ up to 25/page; early-stops on empty
+    request_delay: 1.5         # seconds between pages (politeness; + jitter)
+    # Rotating proxies (Webshare free tier = 10 datacenter IPs). Bare host:port or a
+    # full user:pass@host:port; a 429/dead IP rotates to the next. Empty = direct
+    # (fine for the tiny per-scan budget). Secrets live here (config.yml is gitignored).
+    proxies: []
+    #  - "user:pass@1.2.3.4:6754"
+    #  - "user:pass@p.webshare.io:80"          # or one rotating endpoint
+
   # ATS boards take a list of company slugs (the bit after the ATS domain).
   # CURATE THESE — verify each slug resolves (200, not 404). Examples below are
   # illustrative; replace with UK data-heavy employers you care about.

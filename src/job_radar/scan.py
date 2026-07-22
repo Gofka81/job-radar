@@ -79,6 +79,11 @@ def run_scan(
         # with a max_days_old knob (Adzuna). Deep scans use the full window.
         if recent_days and "max_days_old" in scfg:
             scfg = {**scfg, "max_days_old": min(int(scfg["max_days_old"]), int(recent_days))}
+        # Same freshness tightening for hour-windowed sources (indeed, linkedin): a
+        # regular scan looks back recent_days×24h at most. Only fires when recent_days
+        # is set (unset by default), so no behaviour change out of the box.
+        if recent_days and "hours_old" in scfg:
+            scfg = {**scfg, "hours_old": min(int(scfg["hours_old"]), int(recent_days) * 24)}
 
         run_id = uuid.uuid4().hex[:12]
         src_started = datetime.now(timezone.utc)
