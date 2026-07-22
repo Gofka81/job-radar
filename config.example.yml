@@ -118,6 +118,20 @@ sources:
       - { where: "" }                          # nationwide
     results_to_take: 100
 
+  indeed:
+    enabled: false             # Indeed mobile GraphQL API (no key). Covers Indeed +
+                               # Glassdoor (shared index). Distance in MILES; where=""
+                               # is a nationwide/remote pass. Full JD comes with search.
+    queries: ["data engineer", "analytics engineer"]
+    locations:
+      - { where: "Edinburgh", distance: 40 }
+      - { where: "Glasgow",   distance: 40 }
+      - { where: "London",    distance: 30 }
+      - { where: "" }                          # nationwide + remote catch-all
+    hours_old: 168
+    max_pages: 2
+    results_per_page: 50
+
   # ATS boards take a list of company slugs (the bit after the ATS domain).
   # CURATE THESE — verify each slug resolves (200, not 404). Examples below are
   # illustrative; replace with UK data-heavy employers you care about.

@@ -5,7 +5,7 @@ import json
 import httpx
 import respx
 
-from job_radar.sources import adzuna, oracle, reed, workday
+from job_radar.sources import adzuna, indeed, oracle, reed, workday
 
 
 @respx.mock
@@ -189,3 +189,78 @@ def test_oracle_skips_bad_tenant_without_failing():
     cfg = {"companies": [{"host": _ORC_HOST, "site": "CX_1001"}, {"name": "broken"}]}
     with httpx.Client() as c:
         assert oracle.fetch(cfg, c) == []
+
+
+# --- Indeed (mobile GraphQL API) ------------------------------------------
+
+def _indeed_result(key="abc", title="Data Engineer", company="Acme",
+                   city="Edinburgh", unit="YEAR", smin=60000, smax=80000):
+    return {"job": {
+        "key": key, "title": title, "datePublished": 1750000000000,
+        "employer": {"name": company},
+        "description": {"html": "<p>Build <b>Spark</b> pipelines.</p>"},
+        "location": {"countryName": "United Kingdom", "countryCode": "GB",
+                     "admin1Code": "SCT", "city": city,
+                     "formatted": {"short": city, "long": f"{city} EH1 1BB"}},
+        "compensation": {"baseSalary": {"unitOfWork": unit,
+                                        "range": {"min": smin, "max": smax}},
+                         "estimated": None, "currencyCode": "GBP"},
+        "attributes": [{"label": "Full-time"}],
+    }}
+
+
+@respx.mock
+def test_indeed_parses_and_paginates_per_location():
+    # page 1 returns one job + a cursor; page 2 returns empty → loop stops early
+    page1 = {"data": {"jobSearch": {"pageInfo": {"nextCursor": "C1"},
+                                    "results": [_indeed_result()]}}}
+    empty = {"data": {"jobSearch": {"pageInfo": {"nextCursor": None}, "results": []}}}
+    responses = [httpx.Response(200, json=page1), httpx.Response(200, json=empty)]
+    route = respx.post("https://apis.indeed.com/graphql").mock(side_effect=responses)
+    cfg = {"queries": ["data engineer"], "locations": [{"where": "Edinburgh", "distance": 40}],
+           "max_pages": 3}
+    with httpx.Client() as c:
+        jobs = indeed.fetch(cfg, c)
+
+    assert route.call_count == 2  # stopped after the empty page, not all 3
+    assert len(jobs) == 1
+    j = jobs[0]
+    assert j.source == "indeed" and j.company == "Acme" and j.title == "Data Engineer"
+    assert j.url == "https://uk.indeed.com/viewjob?jk=abc"
+    assert j.location == "Edinburgh EH1 1BB"
+    assert j.description == "Build Spark pipelines."  # HTML tags stripped
+    assert j.jd_full is True                          # full JD came with the search
+    assert j.salary_min == 60000 and j.salary_max == 80000 and j.currency == "GBP"
+    assert str(j.posted_at) == "2025-06-15"
+    # request carried the mobile api key + GB country header
+    req = route.calls[0].request
+    assert req.headers.get("indeed-api-key") and req.headers.get("indeed-co") == "GB"
+
+
+@respx.mock
+def test_indeed_ignores_non_annual_salary_and_blank_key():
+    hourly = _indeed_result(key="h", unit="HOUR", smin=25, smax=40)
+    blank = _indeed_result(key="", title="No key")  # dropped (no job key → no url)
+    body = {"data": {"jobSearch": {"pageInfo": {"nextCursor": None},
+                                   "results": [hourly, blank]}}}
+    respx.post("https://apis.indeed.com/graphql").mock(return_value=httpx.Response(200, json=body))
+    cfg = {"queries": ["x"], "locations": [{"where": ""}], "max_pages": 1}
+    with httpx.Client() as c:
+        jobs = indeed.fetch(cfg, c)
+    assert len(jobs) == 1                    # blank-key result skipped
+    assert jobs[0].salary_min is None and jobs[0].salary_max is None  # hourly not trusted
+
+
+@respx.mock
+def test_indeed_queries_each_query_and_location():
+    body = {"data": {"jobSearch": {"pageInfo": {"nextCursor": None}, "results": []}}}
+    route = respx.post("https://apis.indeed.com/graphql").mock(
+        return_value=httpx.Response(200, json=body))
+    cfg = {"queries": ["data engineer", "databricks"],
+           "locations": [{"where": "Glasgow", "distance": 40}, {"where": ""}], "max_pages": 1}
+    with httpx.Client() as c:
+        indeed.fetch(cfg, c)
+    assert route.call_count == 4  # 2 queries × 2 locations
+    queries = [json.loads(call.request.content)["query"] for call in route.calls]
+    assert any('where: "Glasgow"' in q for q in queries)
+    assert any("location:" not in q for q in queries)  # nationwide pass omits location

@@ -286,8 +286,10 @@ class Store:
         return True
 
     # Statuses the dashboard can set directly (apply-tracking). 'viewed' = opened
-    # but not applied; 'applied' = applied. Kept narrow so a typo can't invent lanes.
-    SETTABLE_STATUSES = ("new", "viewed", "applied", "rejected", "archived")
+    # but not applied (stays in inbox); 'saved' = shortlisted to apply later (moves
+    # to the Tracker board); 'applied'/'rejected' = pipeline lanes on the Tracker.
+    # Kept narrow so a typo can't invent lanes.
+    SETTABLE_STATUSES = ("new", "viewed", "saved", "applied", "rejected", "archived")
 
     def set_status(self, job_id: str, status: str) -> bool:
         """Update ONLY the workflow status (apply-tracking from the dashboard).

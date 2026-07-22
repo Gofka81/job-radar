@@ -189,6 +189,32 @@ DASHBOARD_HTML = r"""<!doctype html>
   table.usage th { color:var(--muted); font-weight:600; }
   .warn { color:var(--danger); font-weight:700; }
 
+  /* ---- pager ---- */
+  .pager { display:flex; align-items:center; justify-content:center; gap:12px;
+           margin:14px 0 4px; }
+  .pager .btn { min-width:82px; }
+  .pager .btn:disabled { opacity:.4; cursor:default; transform:none; }
+  #pgInfo { font-size:13px; min-width:120px; text-align:center; }
+
+  /* ---- tracker kanban ---- */
+  .kanban { display:flex; gap:12px; overflow-x:auto; padding-bottom:8px;
+            scroll-snap-type:x proximity; -webkit-overflow-scrolling:touch; }
+  .kanban::-webkit-scrollbar { height:8px; }
+  .kcol { flex:1 0 300px; min-width:300px; scroll-snap-align:start; background:var(--bg);
+          border:1px solid var(--line); border-radius:12px; padding:10px;
+          display:flex; flex-direction:column; }
+  .kcol-head { display:flex; align-items:center; gap:8px; font-weight:750; font-size:14px;
+               padding:2px 4px 10px; position:sticky; top:0; }
+  .kcol-head .seg-n { font-size:12px; font-weight:700;
+                      background:color-mix(in srgb,var(--muted) 22%,transparent);
+                      border-radius:20px; padding:0 8px; min-width:22px; text-align:center; }
+  .kcol.saved   .kcol-head { color:var(--accent); }
+  .kcol.applied .kcol-head { color:var(--new); }
+  .kcol.rejected .kcol-head { color:var(--danger); }
+  .kcol-body { display:flex; flex-direction:column; gap:9px; overflow-y:auto; }
+  .kcol .job { margin-bottom:0; }
+  .kcol-empty { color:var(--muted); font-size:13px; text-align:center; padding:22px 8px; }
+
   /* ---- auth ---- */
   #auth { display:none; margin-bottom:14px; gap:8px; }
   #token { flex:1; min-width:160px; }
@@ -207,6 +233,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     .brand { font-size:15px; }
     .wrap { padding:12px 12px 40px; }
     .actions .btn span.lbl { display:none; }   /* icon-only actions on phones */
+    /* kanban: one column at a time with a peek of the next; swipe between them */
+    .kcol { flex-basis:84vw; min-width:84vw; }
+    .pager .btn { flex:1; }
   }
 </style>
 </head>
@@ -215,7 +244,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="bar">
     <span class="brand">📡 job-radar</span>
     <nav class="tabs" id="tabs">
-      <button class="tab on" data-view="jobs">Jobs</button>
+      <button class="tab on" data-view="jobs">🧭 Jobs</button>
       <button class="tab" data-view="tracker">📌 Tracker</button>
       <button class="tab" data-view="config">⚙ Config</button>
       <button class="tab" data-view="rubric">📋 Rubric</button>
@@ -240,7 +269,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <div class="actions">
         <button class="btn" id="scan" title="Scan now (recent window)">🛰 <span class="lbl">Scan</span></button>
-        <button class="btn" id="deepscan" title="Deep scan — pull the whole window">🔭</button>
+        <button class="btn" id="deepscan" title="Deep scan — pull the whole window">🔭 <span class="lbl">Deep scan</span></button>
         <button class="btn" id="analyze" title="LLM triage of new jobs">✨ <span class="lbl">Analyze</span></button>
       </div>
     </div>
@@ -269,6 +298,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
     <div id="msg"></div>
     <div id="list"></div>
+    <div id="pager" class="pager" style="display:none">
+      <button class="btn" id="pgPrev">← Prev</button>
+      <span id="pgInfo" class="muted"></span>
+      <button class="btn" id="pgNext">Next →</button>
+    </div>
   </div>
 
   <!-- ============ TRACKER ============ -->
@@ -277,12 +311,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button class="btn" id="trkReload">↻ Reload</button>
       <span id="trkMsg" class="muted"></span>
     </div>
-    <div id="trkChips" class="chips"></div>
-    <div id="trkBox"></div>
+    <div id="trkBox" class="kanban"></div>
     <div class="hint">
-      Your real pipeline: Applied + Rejected. Applying to a job moves it here out of the
-      inbox; use the buttons to change stage. Seen-but-not-applied jobs stay in the inbox
-      (dimmed); hidden ones are under “Archived” in the Jobs status lanes.
+      Your pipeline board — drag stages with the buttons on each card. <b>🔖 Saved</b> =
+      shortlisted to apply (from a job link, or the popup after opening one). <b>✅ Applied</b>
+      and <b>🚫 Rejected</b> track the rest. Seen-but-untouched jobs stay in the 🧭 Jobs inbox
+      (dimmed); hidden ones live in the Jobs “Archived” lane.
     </div>
   </div>
 
@@ -335,7 +369,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="applyJob" class="muted"></div>
     <div class="modal-actions">
       <button id="amApplied" class="btn primary">✅ Applied</button>
-      <button id="amViewed" class="btn">👀 Just viewed (keep in inbox)</button>
+      <button id="amSaved" class="btn">🔖 Save for later</button>
       <button id="amArchive" class="btn">🚫 Not interested (hide)</button>
       <button id="amDismiss" class="btn ghost">✕ Not now</button>
     </div>
@@ -381,18 +415,24 @@ const RECENT_MS = 48*3600*1000;   // "recent" default window (inbox only)
 let SHOW_ALL = false;             // recency toggle (off = recent only)
 let LANE = "inbox";               // active status lane
 
-// Explicit, honest status filter sets (predicate over a job's status).
+// Client-side pagination over the filtered set. 25 balances a scannable page
+// against too many clicks (a full scan yields 400+ across sources). PAGE resets
+// to 1 whenever the filter set changes (lane/search/sort/filters); the pager
+// buttons just move within the current set.
+const PAGE_SIZE = 25;
+let PAGE = 1;
+function applyFilters(){ PAGE = 1; viewJobs(); }
+
+// Jobs is the discovery surface, so its lanes stay minimal: the working Inbox,
+// hidden Archived (restore point), and All (escape hatch). Applied/Rejected/Saved
+// are pipeline states — they live on the 📌 Tracker board, not here.
 const STATUS_SETS = {
   inbox:    s => s === "new" || s === "viewed",
-  applied:  s => s === "applied",
-  rejected: s => s === "rejected",
   archived: s => s === "archived",
   all:      () => true,
 };
 const LANES = [
   { key:"inbox",    label:"Inbox" },
-  { key:"applied",  label:"Applied" },
-  { key:"rejected", label:"Rejected" },
   { key:"archived", label:"Archived" },
   { key:"all",      label:"All" },
 ];
@@ -410,7 +450,7 @@ function renderLanes(){
 }
 $("#lanes").onclick = (e) => {
   const b = e.target.closest("[data-lane]"); if (!b) return;
-  LANE = b.dataset.lane; renderLanes(); viewJobs();
+  LANE = b.dataset.lane; renderLanes(); applyFilters();
 };
 
 // One posting can list several cities (locations[], stored priority-first by the
@@ -451,7 +491,15 @@ function viewJobs() {
                // highest score first; unscored (null) sink to the bottom; ties → newest
                score:(a,b)=> ((b.score??-1)-(a.score??-1)) || recent(a,b) };
   v.sort(by[k]);
-  render(v);
+
+  // paginate the sorted/filtered set (PAGE clamped in case the set shrank)
+  const total = v.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (PAGE > pages) PAGE = pages;
+  const start = (PAGE - 1) * PAGE_SIZE;
+  const pageItems = v.slice(start, start + PAGE_SIZE);
+  render(pageItems);
+  renderPager(total, pages);
 
   // recency toggle only meaningful for the inbox
   const isInbox = LANE === "inbox";
@@ -465,7 +513,21 @@ function viewJobs() {
   const af = activeFilterCount();
   $("#fbadge").style.display = af ? "" : "none"; $("#fbadge").textContent = af;
   const suffix = (isInbox && !SHOW_ALL) ? " · recent 48h" : "";
-  $("#ministat").innerHTML = `<b>${v.length}</b> shown${suffix}`;
+  const range = total > PAGE_SIZE ? ` · ${start + 1}–${start + pageItems.length}` : "";
+  $("#ministat").innerHTML = `<b>${total}</b> match${total === 1 ? "" : "es"}${range}${suffix}`;
+}
+function renderPager(total, pages){
+  const p = $("#pager");
+  if (total <= PAGE_SIZE) { p.style.display = "none"; return; }
+  p.style.display = "flex";
+  $("#pgPrev").disabled = PAGE <= 1;
+  $("#pgNext").disabled = PAGE >= pages;
+  $("#pgInfo").textContent = `Page ${PAGE} / ${pages}`;
+}
+function gotoPage(delta){
+  PAGE += delta; viewJobs();
+  // jump back to the top of the list so a new page starts at its first card
+  $("#list").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function salaryStr(j) {
   const k = n => "£" + Math.round(n/1000) + "k";
@@ -519,8 +581,11 @@ function emptyState(){
   return `<div class="empty">${msg}</div>`;
 }
 
-async function fetchJobs() {
+async function fetchJobs(resetPage=false) {
   // Search (incl. JD/tech-stack) is server-side; the q is sent to /api/jobs.
+  // `resetPage` only from the search box — the triage poller reuses this and must
+  // NOT yank a browsing user back to page 1 on every refresh.
+  if (resetPage) PAGE = 1;
   const q = $("#q").value.trim();
   const url = "/api/jobs?limit=500" + (q ? "&q=" + encodeURIComponent(q) : "");
   JOBS = (await (await api(url)).json()).jobs || [];
@@ -596,10 +661,14 @@ async function saveRubric() {
   } catch(e){ if (e.message!=="auth") $("#rubMsg").textContent = "Error: "+e.message; }
 }
 
-// --- tracker view (real pipeline: applied / rejected) ---
+// --- tracker view: horizontal kanban board (Saved → Applied → Rejected) ---
 const STAGES = [
-  { key: "applied",  label: "✅ Applied",  moves: [["rejected","🚫 Rejected"], ["new","↩ Back to review"]] },
-  { key: "rejected", label: "🚫 Rejected", moves: [["new","↩ Back to review"]] },
+  { key: "saved",    label: "🔖 Saved",    cls: "saved",
+    moves: [["applied","✅ Applied"], ["rejected","🚫 Reject"], ["new","↩ Inbox"]] },
+  { key: "applied",  label: "✅ Applied",  cls: "applied",
+    moves: [["rejected","🚫 Rejected"], ["new","↩ Inbox"]] },
+  { key: "rejected", label: "🚫 Rejected", cls: "rejected",
+    moves: [["saved","🔖 Save"], ["new","↩ Inbox"]] },
 ];
 function trackerCard(j, moves) {
   const band = scoreBand(j.score);
@@ -621,19 +690,17 @@ async function loadTracker() {
   $("#trkMsg").textContent = "loading…";
   try {
     JOBS = (await (await api("/api/jobs?limit=500")).json()).jobs || [];  // keep cache fresh
-    $("#trkChips").innerHTML = STAGES.map(s =>
-      `<div class="chip"><b>${JOBS.filter(j => j.status===s.key).length}</b>`
-      + `<span>${s.label.replace(/^\S+\s/, "")}</span></div>`).join("");
-    let html = "";
-    for (const s of STAGES) {
-      const items = JOBS.filter(j => j.status === s.key)
-        .sort((a,b) => (b.first_seen||"").localeCompare(a.first_seen||""));
-      if (!items.length) continue;
-      html += `<div class="trk-sec">${s.label} (${items.length})</div>`
-            + items.map(j => trackerCard(j, s.moves)).join("");
-    }
-    $("#trkBox").innerHTML = html ||
-      '<div class="empty">Nothing tracked yet — apply to a job, or hit ✅ on the popup.</div>';
+    const recent = (a,b) => (b.first_seen||"").localeCompare(a.first_seen||"");
+    $("#trkBox").innerHTML = STAGES.map(s => {
+      const items = JOBS.filter(j => j.status === s.key).sort(recent);
+      const body = items.length
+        ? items.map(j => trackerCard(j, s.moves)).join("")
+        : `<div class="kcol-empty">Nothing here yet.</div>`;
+      return `<div class="kcol ${s.cls}">
+        <div class="kcol-head">${s.label}<span class="seg-n">${items.length}</span></div>
+        <div class="kcol-body">${body}</div>
+      </div>`;
+    }).join("");
     $("#trkMsg").textContent = "";
   } catch(e){ if (e.message!=="auth") $("#trkMsg").textContent = "Error: "+e.message; }
 }
@@ -748,14 +815,16 @@ $("#cfgReload").onclick = loadConfig;
 $("#rubSave").onclick = saveRubric;
 $("#rubReload").onclick = loadRubric;
 $("#useReload").onclick = loadUsage;
-$("#sort").onchange = viewJobs;
+$("#sort").onchange = applyFilters;
 $("#filtersToggle").onclick = () => $("#moreFilters").classList.toggle("open");
 let qTimer;  // debounce server-side search so we don't refetch on every keystroke
-$("#q").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(fetchJobs, 300); };
-$("#floc").onchange = viewJobs;
-$("#fsource").onchange = viewJobs;
-$("#fsalary").oninput = viewJobs;
-$("#recency").onclick = () => { SHOW_ALL = !SHOW_ALL; viewJobs(); };
+$("#q").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(() => fetchJobs(true), 300); };
+$("#floc").onchange = applyFilters;
+$("#fsource").onchange = applyFilters;
+$("#fsalary").oninput = applyFilters;
+$("#recency").onclick = () => { SHOW_ALL = !SHOW_ALL; applyFilters(); };
+$("#pgPrev").onclick = () => gotoPage(-1);
+$("#pgNext").onclick = () => gotoPage(1);
 $("#scan").onclick = async () => {
   try {
     const r = await api("/api/scan", { method:"POST" });
@@ -801,12 +870,21 @@ $("#list").onclick = (e) => {
     return;
   }
   const a = e.target.closest("a.joblink");
-  if (a && a.dataset.jid) {  // opening a job → remember it so we can ask on return
+  if (a && a.dataset.jid) {  // opening a job → mark viewed (default) + remember it
     const j = JOBS.find(x => x.job_id === a.dataset.jid);
-    if (j) setPending({ jid: j.job_id, co: j.company, ti: j.title });
+    if (j) { setPending({ jid: j.job_id, co: j.company, ti: j.title }); markViewedSilently(j); }
     // don't preventDefault — let the link open
   }
 };
+// Opening a job's link IS the "viewed" signal — mark it silently (no popup button
+// for it any more). Only advances untouched 'new' jobs; leaves saved/applied/etc.
+function markViewedSilently(j){
+  if (!j || j.status !== "new") return;
+  j.status = "viewed";                          // optimistic local update (dims the card)
+  api("/api/status", { method:"POST", headers:{ "content-type":"application/json" },
+    body: JSON.stringify({ job_id: j.job_id, status: "viewed" }) }).catch(()=>{});
+  if (VIEW === "jobs") viewJobs();
+}
 function showApplyModal() {
   if (!pendingApply || $("#applyModal").style.display === "flex") return;
   $("#applyJob").textContent = (pendingApply.co || "") + " — " + (pendingApply.ti || "");
@@ -814,8 +892,8 @@ function showApplyModal() {
 }
 function closeApplyModal() { $("#applyModal").style.display = "none"; setPending(null); }
 const STATUS_MSG = { applied:"✅ Applied → see the 📌 Tracker", viewed:"👀 Marked seen — stays in your inbox, dimmed",
-  rejected:"🚫 Rejected", archived:"🚫 Hidden (open the Archived lane to find it)",
-  new:"↩ Back in the review list" };
+  saved:"🔖 Saved → see the 📌 Tracker", rejected:"🚫 Rejected",
+  archived:"🚫 Hidden (open the Archived lane to find it)", new:"↩ Back in the review list" };
 async function markStatus(jid, status) {
   try {
     await api("/api/status", { method:"POST", headers:{ "content-type":"application/json" },
@@ -829,7 +907,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", showApplyModal);  // fallback for browsers that skip the above
 $("#amApplied").onclick = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "applied"); };
-$("#amViewed").onclick  = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "viewed"); };
+$("#amSaved").onclick   = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "saved"); };
 $("#amArchive").onclick = () => { const j = pendingApply; closeApplyModal(); if (j) markStatus(j.jid, "archived"); };
 $("#amDismiss").onclick = closeApplyModal;
 $("#applyModal").onclick = (e) => { if (e.target.id === "applyModal") closeApplyModal(); };  // tap backdrop
