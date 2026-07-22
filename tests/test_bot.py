@@ -90,6 +90,19 @@ def test_analyze_button_callback_triggers(db, sent):
     assert fired == [1]
 
 
+def test_stop_command_triggers(db, sent):
+    fired = []
+    bot.handle_update(_msg("/stop"), db,
+                      stop_fn=lambda: fired.append(1) or {"stopping": True, "dropped_queued": 0})
+    assert fired == [1] and "halting triage" in sent["send"][0][1].lower()
+
+
+def test_stop_command_when_idle(db, sent):
+    bot.handle_update(_msg("/stop"), db,
+                      stop_fn=lambda: {"stopping": False, "dropped_queued": 0})
+    assert "nothing to stop" in sent["send"][0][1].lower()
+
+
 def test_funnel(db, sent):
     bot.handle_update(_msg("/funnel"), db)
     assert "Funnel" in sent["send"][0][1]

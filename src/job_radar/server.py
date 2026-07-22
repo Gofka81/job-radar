@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from . import bot, notify, setup_logging
 from .analyze import run_analyze
+from .boards import BoardStore, boards_db_path
 from .dashboard import DASHBOARD_HTML
 from .config import ROOT, load_config, load_rubric, read_config_text, save_config, save_rubric
 from .scan import run_scan
@@ -48,6 +49,10 @@ _analyze_lock = threading.Lock()  # guards the state + dedup bookkeeping below
 _analyze_state: dict = {"running": False, "current": None, "last": None}
 _queued_singles: set[str] = set()  # job_ids queued or running as singles (dedup)
 _queued_batch: bool = False        # a batch is queued or running (dedup + button block)
+# Halt signal for the running triage. Set by POST /api/analyze/stop, checked before
+# each job in run_analyze, and cleared when a fresh task starts. A stop also drains
+# the queue so nothing else kicks off. Lets a big/max_jobs batch be cancelled.
+_analyze_cancel = threading.Event()
 
 # Telegram webhook secret, set at startup if the bot is configured.
 _WEBHOOK: dict = {"secret": None}
@@ -106,6 +111,7 @@ def _run_task(task: dict) -> None:
     Never raises — a crash is logged into `last` so the worker keeps draining."""
     kind, db = task["kind"], task["db"]
     job_ids, only_untriaged = task.get("job_ids"), task.get("only_untriaged", True)
+    _analyze_cancel.clear()  # each task starts un-cancelled; stop targets THIS run
     with _analyze_lock:
         _analyze_state["running"] = True
         _analyze_state["current"] = {"kind": kind, "total": None, "scored": 0, "errors": 0}
@@ -118,7 +124,8 @@ def _run_task(task: dict) -> None:
 
     try:
         result = run_analyze(load_config(), db, job_ids=job_ids,
-                             only_untriaged=only_untriaged, progress=progress)
+                             only_untriaged=only_untriaged, progress=progress,
+                             should_stop=_analyze_cancel.is_set)
         with _analyze_lock:
             _analyze_state["last"] = result
         _analyze_alert(result)
@@ -187,16 +194,38 @@ def _enqueue_analyze(db: str, kind: str, job_ids: list[str] | None) -> dict | No
         return {"queued": True, "kind": kind, "position": _analyze_q.qsize()}
 
 
+def _stop_analyze() -> dict:
+    """Halt triage: signal the running task to stop before its next job AND drain
+    the queue so nothing else starts. Resets the dedup bookkeeping so the buttons
+    unlock. Returns what it acted on."""
+    global _queued_batch
+    _analyze_cancel.set()
+    dropped = 0
+    with _analyze_lock:
+        while True:
+            try:
+                _analyze_q.get_nowait()
+                _analyze_q.task_done()
+                dropped += 1
+            except queue.Empty:
+                break
+        was_running = _analyze_state["running"]
+        _queued_batch = False
+        _queued_singles.clear()
+    return {"stopping": was_running, "dropped_queued": dropped}
+
+
 def _analyze_snapshot() -> dict:
     """Current queue state for GET /api/analyze — running flag, live progress of the
-    task in flight, how many are waiting, whether a batch is in the pipeline, and the
-    last finished run's result."""
+    task in flight, how many are waiting, whether a batch is in the pipeline, whether
+    a halt is pending, and the last finished run's result."""
     with _analyze_lock:
         return {
             "running": _analyze_state["running"],
             "current": dict(_analyze_state["current"]) if _analyze_state["current"] else None,
             "queued": _analyze_q.qsize(),
             "batch_active": _queued_batch,
+            "stopping": _analyze_cancel.is_set() and _analyze_state["running"],
             "last": _analyze_state["last"],
         }
 
@@ -226,6 +255,14 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+class BoardAdd(BaseModel):
+    # Manually seed a discovered ATS board. `slug` is the board id (or host|site
+    # for workday/oracle); `company` is an optional display name.
+    ats: str
+    slug: str
+    company: str | None = None
+
+
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token gate. Fails closed: if no token is configured on the
     server the endpoint refuses rather than serving open to the internet."""
@@ -248,6 +285,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
             yield store
         finally:
             store.close()
+
+    def get_boards():
+        bs = BoardStore(boards_db_path(db))
+        try:
+            yield bs
+        finally:
+            bs.close()
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> str:
@@ -378,6 +422,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
         """Queue state: running flag, live progress, queue depth, and the last run."""
         return _analyze_snapshot()
 
+    @app.post("/api/analyze/stop")
+    def analyze_stop(_: None = Depends(require_token)) -> dict:
+        """Halt triage — stop the running batch before its next job and drop any
+        queued tasks. The in-flight job finishes; already-scored jobs are kept."""
+        return _stop_analyze()
+
     @app.get("/api/usage")
     def usage(
         limit: int = 50,
@@ -387,6 +437,44 @@ def create_app(db_path: str | None = None) -> FastAPI:
         """LLM token spend — recent runs, grand totals, per-model breakdown. Feeds
         the dashboard Usage view so you can see what's consuming tokens."""
         return store.llm_usage(limit)
+
+    @app.get("/api/boards")
+    def get_boards_list(
+        ats: str | None = None,
+        _: None = Depends(require_token),
+        boards: BoardStore = Depends(get_boards),
+    ) -> dict:
+        """Discovered ATS boards (the durable company directory), newest-first.
+        The ATS connectors scan these UNIONed with the config.yml companies."""
+        return {"boards": boards.list_boards(ats)}
+
+    @app.post("/api/boards")
+    def add_board(
+        body: BoardAdd,
+        _: None = Depends(require_token),
+        boards: BoardStore = Depends(get_boards),
+    ) -> dict:
+        """Manually seed a board. Next scan picks it up (no redeploy). 400 on a bad
+        ATS / empty slug."""
+        try:
+            inserted = boards.upsert_board(
+                body.ats, body.slug, company=body.company, discovered_from="manual"
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"saved": True, "inserted": inserted}
+
+    @app.delete("/api/boards")
+    def delete_board(
+        ats: str,
+        slug: str,
+        _: None = Depends(require_token),
+        boards: BoardStore = Depends(get_boards),
+    ) -> dict:
+        """Remove a board (bad/dead slug). 404 if unknown."""
+        if not boards.remove(ats, slug):
+            raise HTTPException(404, "unknown board")
+        return {"deleted": True}
 
     @app.post("/telegram/webhook")
     def telegram_webhook(
@@ -404,7 +492,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
         def _trigger_analyze() -> None:  # queue a batch (all untriaged, max_jobs-capped)
             _enqueue_analyze(db, "batch", None)
 
-        bot.handle_update(update, db, scan_fn=_trigger_scan, analyze_fn=_trigger_analyze)
+        bot.handle_update(update, db, scan_fn=_trigger_scan, analyze_fn=_trigger_analyze,
+                          stop_fn=_stop_analyze)
         return {"ok": True}
 
     return app

@@ -203,3 +203,26 @@ def test_guarded_scan_single_flight(monkeypatch, tmp_path):
     finally:
         srv._scan_lock.release()
     assert called == []
+
+
+def test_boards_add_list_delete(client):
+    c, _ = client
+    assert c.get("/api/boards").json() == {"boards": []}
+    r = c.post("/api/boards", json={"ats": "greenhouse", "slug": "Monzo", "company": "Monzo"})
+    assert r.status_code == 200 and r.json() == {"saved": True, "inserted": True}
+    boards = c.get("/api/boards").json()["boards"]
+    assert len(boards) == 1 and boards[0]["slug"] == "monzo" and boards[0]["discovered_from"] == "manual"
+    # re-add same board -> update, not a new row
+    assert c.post("/api/boards", json={"ats": "greenhouse", "slug": "monzo"}).json()["inserted"] is False
+    # bad ats rejected
+    assert c.post("/api/boards", json={"ats": "linkedin", "slug": "x"}).status_code == 400
+    # delete
+    assert c.request("DELETE", "/api/boards", params={"ats": "greenhouse", "slug": "monzo"}).status_code == 200
+    assert c.get("/api/boards").json() == {"boards": []}
+    assert c.request("DELETE", "/api/boards", params={"ats": "greenhouse", "slug": "monzo"}).status_code == 404
+
+
+def test_boards_require_token(client):
+    c, _ = client
+    r = c.get("/api/boards", headers={"authorization": "Bearer wrong"})
+    assert r.status_code == 401

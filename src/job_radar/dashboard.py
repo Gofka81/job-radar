@@ -287,6 +287,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <button class="btn" id="scan" title="Scan now (recent window)">🛰 <span class="lbl">Scan</span></button>
         <button class="btn" id="deepscan" title="Deep scan — pull the whole window">🔭 <span class="lbl">Deep scan</span></button>
         <button class="btn" id="analyze" title="LLM triage of new jobs">✨ <span class="lbl">Analyze</span></button>
+        <button class="btn" id="stopAnalyze" title="Halt the running triage" style="display:none">⏹ <span class="lbl">Stop</span></button>
       </div>
     </div>
 
@@ -823,6 +824,7 @@ async function syncTriage() {  // on load: reflect any in-flight run without an 
   try {
     const s = await (await api("/api/analyze")).json();
     setBatchBusy(!!s.batch_active);
+    setStopVisible(s.running || (s.queued||0) > 0);
     if (s.running || s.queued) startPoll();
   } catch(e){}
 }
@@ -831,14 +833,18 @@ function setBatchBusy(busy){
   b.disabled = busy; b.style.opacity = busy ? .55 : "";
   b.style.cursor = busy ? "default" : "";
 }
+function setStopVisible(show){ $("#stopAnalyze").style.display = show ? "" : "none"; }
 async function pollAnalyze() {
   POLL = true;
   try {
     const s = await (await api("/api/analyze")).json();
     const c = s.current, q = s.queued||0;
     setBatchBusy(!!s.batch_active);
+    setStopVisible(s.running || q > 0);   // something to halt
     // live progress line
-    if (s.running && c) {
+    if (s.stopping) {
+      $("#msg").textContent = "⏹ Halting after the current job…";
+    } else if (s.running && c) {
       const what = c.kind==="batch" ? "Triaging" : "Scoring";
       const tot = c.total==null ? "…" : c.total;
       $("#msg").textContent = `✨ ${what} ${c.scored||0}/${tot}`
@@ -849,13 +855,15 @@ async function pollAnalyze() {
     await fetchJobs();  // reflect new scores + clear finished spinners (see render/SPIN)
     if (s.running || q) { POLL = setTimeout(pollAnalyze, 1500); return; }
     // idle: queue drained — settle the message from the last run
-    POLL = null; setBatchBusy(false);
+    POLL = null; setBatchBusy(false); setStopVisible(false);
     const last = s.last || {};
     if (last.auth_failed)
       $("#msg").innerHTML = '<span class="warn">⛔ Claude not logged in — set '
         + 'CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) and redeploy.</span>';
     else if (last.budget_hit)
       $("#msg").innerHTML = '<span class="warn">⛔ Out of budget / rate limited — triage stopped.</span>';
+    else if (last.cancelled)
+      $("#msg").textContent = `⏹ Halted — scored ${last.totals.scored} before stopping.`;
     else if (last.totals)
       $("#msg").textContent = `✨ Done — scored ${last.totals.scored} (${last.totals.errors||0} err)`;
   } catch(e){ POLL = null; }
@@ -982,8 +990,14 @@ $("#analyze").onclick = async () => {
       + `Pro quota (capped by analysis.max_jobs). Use a card's ✨ for one at a time.`)) return;
   setBatchBusy(true);                   // block the button immediately
   const d = await enqueueTriage("all_pending");
-  if (d && (d.queued || d.duplicate)) { $("#msg").textContent = "✨ Batch queued…"; startPoll(); }
+  if (d && (d.queued || d.duplicate)) { $("#msg").textContent = "✨ Batch queued…"; setStopVisible(true); startPoll(); }
   else setBatchBusy(false);             // enqueue failed (queue full) — unblock
+};
+$("#stopAnalyze").onclick = async () => {
+  const b = $("#stopAnalyze"); b.disabled = true;
+  $("#msg").textContent = "⏹ Halting after the current job…";
+  try { await api("/api/analyze/stop", { method:"POST" }); } catch(e){}
+  b.disabled = false; startPoll();      // poll reflects the wind-down + final message
 };
 renderLanes();
 load();

@@ -125,6 +125,27 @@ def test_run_analyze_scores_and_survives_a_bad_job(tmp_path, monkeypatch):
     assert len(scored) == 1 and scored[0]["score"] == 8  # only the good job written
 
 
+def test_run_analyze_halts_on_should_stop(tmp_path, monkeypatch):
+    """A halt request stops the run before its next job: partial scores kept +
+    recorded, cancelled flagged, the rest skipped."""
+    db = tmp_path / "a.duckdb"
+    _seed(db, 3)
+    monkeypatch.setattr(analyze, "load_rubric", lambda: "r")
+    monkeypatch.setattr(analyze, "_score_cli", lambda *a, **k: (Triage(score=5, reason="ok"), U))
+
+    calls = {"n": 0}
+    def stop_after_one():          # let the first job through, halt before the second
+        stop = calls["n"] >= 1
+        calls["n"] += 1
+        return stop
+
+    result = run_analyze(CFG, str(db), should_stop=stop_after_one)
+    assert result["cancelled"] is True
+    assert result["totals"]["scored"] == 1        # only the first job scored
+    scored = [j for j in Store(db).list_jobs() if j["score"] is not None]
+    assert len(scored) == 1                        # the rest left untriaged
+
+
 def test_run_analyze_caps_jobs_per_run(tmp_path, monkeypatch):
     """The cost ceiling: never score more than analysis.max_jobs in one run, and
     report what was skipped rather than silently dropping it."""
@@ -278,6 +299,7 @@ def _reset_analyze_queue():
                     break
             srv._queued_batch = False
             srv._queued_singles.clear()
+            srv._analyze_cancel.clear()
             srv._analyze_state.update(running=False, current=None, last=None)
 
     _reset()
@@ -347,6 +369,64 @@ def test_analyze_queue_dedups_batch_while_running(client, monkeypatch):
     dup = client.post("/api/analyze", json={"mode": "triage"}).json()
     assert dup["queued"] is False and dup["duplicate"] is True
     gate.set()  # let the first batch finish so the queue drains
+
+
+def test_analyze_stop_requires_token(client):
+    assert client.post("/api/analyze/stop", headers={"authorization": "x"}).status_code == 401
+
+
+def test_analyze_stop_halts_running_and_unlocks(client, monkeypatch):
+    """POST /api/analyze/stop makes should_stop() true so the run winds down, and
+    resets the batch flag so the button unlocks."""
+    import job_radar.server as srv
+
+    started = threading.Event()
+
+    def blocking(cfg, db, should_stop=None, **k):
+        started.set()
+        while not (should_stop and should_stop()):   # spin until halted
+            time.sleep(0.01)
+        return {"totals": {"scored": 2}, "cancelled": True}
+
+    monkeypatch.setattr(srv, "run_analyze", blocking)
+    assert client.post("/api/analyze", json={"mode": "triage"}).json()["queued"] is True
+    assert started.wait(2), "worker never started the batch"
+    assert client.get("/api/analyze").json()["batch_active"] is True
+
+    r = client.post("/api/analyze/stop")
+    assert r.status_code == 200 and r.json()["stopping"] is True
+    # run winds down, flags reset → batch no longer active, last flagged cancelled
+    assert _wait(lambda: srv._analyze_snapshot()["batch_active"] is False)
+    assert _wait(lambda: (srv._analyze_snapshot()["last"] or {}).get("cancelled"))
+
+
+def test_analyze_stop_drops_queued_task(client, monkeypatch):
+    """A queued batch behind a running one is dropped by stop (dropped_queued>=1)."""
+    import job_radar.server as srv
+
+    started, gate = threading.Event(), threading.Event()
+
+    def blocking(cfg, db, should_stop=None, **k):
+        started.set()
+        gate.wait(2)
+        return {"totals": {"scored": 0}}
+
+    monkeypatch.setattr(srv, "run_analyze", blocking)
+    # first single starts and blocks; queue a second distinct single behind it
+    client.post("/api/analyze", json={"mode": "triage", "target": ["a"]})
+    assert started.wait(2)
+    client.post("/api/analyze", json={"mode": "triage", "target": ["b"]})
+    assert _wait(lambda: srv._analyze_q.qsize() == 1)
+
+    r = client.post("/api/analyze/stop").json()
+    assert r["dropped_queued"] == 1 and r["stopping"] is True
+    assert srv._analyze_q.qsize() == 0 and not srv._queued_singles
+    gate.set()
+
+
+def test_analyze_stop_noop_when_idle(client):
+    r = client.post("/api/analyze/stop").json()
+    assert r == {"stopping": False, "dropped_queued": 0}
 
 
 def test_analyze_dedups_same_single_job(client, monkeypatch):

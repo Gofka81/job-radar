@@ -6,6 +6,7 @@ Commands:
   /jobs [search]  active jobs, score-sorted (optional text search incl. JD)
   /top            only AI-scored jobs, best first
   /analyze        run AI triage on pending jobs (claude-cli)
+  /stop           halt a running triage batch
   /funnel         counts (found → applied)
   /scan           run a scan now
   /help
@@ -33,17 +34,18 @@ def handle_update(
     db: str,
     scan_fn: Callable[[], None] | None = None,
     analyze_fn: Callable[[], None] | None = None,
+    stop_fn: Callable[[], object] | None = None,
 ) -> None:
     """Entry point for a Telegram webhook update."""
     if cq := update.get("callback_query"):
         _on_callback(cq, db, analyze_fn)
     elif msg := update.get("message"):
-        _on_message(msg, db, scan_fn, analyze_fn)
+        _on_message(msg, db, scan_fn, analyze_fn, stop_fn)
 
 
 # --- message commands -----------------------------------------------------
 
-def _on_message(msg: dict, db: str, scan_fn, analyze_fn) -> None:
+def _on_message(msg: dict, db: str, scan_fn, analyze_fn, stop_fn=None) -> None:
     if not _allowed((msg.get("from") or {}).get("id")):
         return  # not you → ignore
     chat = (msg.get("chat") or {}).get("id")
@@ -66,6 +68,16 @@ def _on_message(msg: dict, db: str, scan_fn, analyze_fn) -> None:
                                       "/jobs and /top shortly (bounded by analysis.max_jobs).")
         else:
             notify.send_message(chat, "AI triage isn't configured on the server.")
+    elif cmd in ("stop", "halt", "cancel"):
+        if stop_fn:
+            r = stop_fn() or {}
+            if r.get("stopping") or r.get("dropped_queued"):
+                notify.send_message(chat, "⏹ <b>Halting triage</b> — stopping after the "
+                                          "current job; queued runs dropped.")
+            else:
+                notify.send_message(chat, "Nothing to stop — no triage is running.")
+        else:
+            notify.send_message(chat, "Stop isn't wired on the server.")
     elif cmd in ("funnel", "stats"):
         notify.send_message(chat, _funnel_text(db))
     elif cmd == "scan":
@@ -213,6 +225,7 @@ def _help_text() -> str:
         "📋 /jobs <i>[search]</i> — pending jobs, best score first\n"
         "🔝 /top — only AI-scored jobs\n"
         "✨ /analyze — run AI triage on pending\n"
+        "⏹ /stop — halt a running triage\n"
         "📊 /funnel — counts (found → applied)\n"
         "🔄 /scan — run a scan now\n\n"
         "🟢 7-10 · 🟡 5-6 · 🔴 0-4 · ⚪ not scored"

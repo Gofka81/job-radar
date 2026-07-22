@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import setup_logging
+from .boards import KNOWN_ATS, SLUG_ATS, BoardStore, boards_db_path
 from .config import ROOT, load_config
 
 logger = logging.getLogger("job_radar.scan")
@@ -16,6 +17,28 @@ from .schema import Job
 from .sources import REGISTRY
 from .sources.base import client
 from .store import Store
+
+
+def _union_companies(sid: str, existing: list, discovered: list) -> list:
+    """Merge the hand-curated config `companies` with discovered boards for an ATS
+    source, config first, de-duplicated. Slug ATS de-dupe case-insensitively on the
+    slug string; tenant ATS (workday/oracle) on (host, site)."""
+    if not discovered:
+        return existing
+    out = list(existing)
+    if sid in SLUG_ATS:
+        seen = {str(s).strip().lower() for s in existing if isinstance(s, str)}
+        for s in discovered:
+            if s.lower() not in seen:
+                out.append(s)
+                seen.add(s.lower())
+    else:  # tenant ATS: entries are {host, site, name} dicts
+        seen = {(e.get("host"), e.get("site")) for e in existing if isinstance(e, dict)}
+        for e in discovered:
+            if (e.get("host"), e.get("site")) not in seen:
+                out.append(e)
+                seen.add((e.get("host"), e.get("site")))
+    return out
 
 
 def _load_env() -> None:
@@ -67,12 +90,22 @@ def run_scan(
     live_sources: list[str] = []  # sources that fetched OK this run (safe to prune)
     started = datetime.now(timezone.utc)
 
+    # Discovered ATS boards live in their own durable DB; scan the hand-curated
+    # config companies UNIONed with the active rows there (self-expanding sources).
+    boards = None if dry_run else BoardStore(boards_db_path(db_path))
+
     for sid, mod in REGISTRY.items():
         scfg = sources_cfg.get(sid, {})
         if not scfg.get("enabled", False):
             continue
         if only_source and sid != only_source:
             continue
+
+        # Union in auto-discovered / manually-seeded boards for this ATS.
+        if boards is not None and sid in KNOWN_ATS:
+            merged = _union_companies(sid, scfg.get("companies", []) or [],
+                                      boards.config_entries(sid))
+            scfg = {**scfg, "companies": merged}
 
         # Regular scans tighten the freshness window (fewer results + fewer API
         # calls, since empty pages break the loop earlier). Only affects sources
@@ -148,6 +181,8 @@ def run_scan(
             log(f"  ↑ enriched {len(full_jds)} Reed JD(s) via detail API")
 
     http.close()
+    if boards is not None:
+        boards.close()
 
     # Mark jobs that dropped off their (successfully-scanned) source > N hours ago
     # as 'expired' — the posting is closed/filled. Marked, not deleted, so it stays

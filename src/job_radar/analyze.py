@@ -235,13 +235,17 @@ def run_analyze(
     only_untriaged: bool = True,
     log=None,
     progress=None,
+    should_stop=None,
 ) -> dict:
     """Triage pending jobs and write score + reason back. Mirrors run_scan's
     shape: short per-job DB locks, never raises on one bad job (logs + continues,
     connector-style). `job_ids` targets a specific set; otherwise all pending.
 
     `progress(scored, errors, total)` — optional callback fired at start and after
-    every job, so the server's queue worker can surface live progress (e.g. 4/12)."""
+    every job, so the server's queue worker can surface live progress (e.g. 4/12).
+    `should_stop()` — optional predicate checked before each job; when it returns
+    True the run halts cleanly (so a big/max_jobs batch can be cancelled mid-run —
+    the in-flight job finishes, the rest are skipped)."""
     if log is None:
         log = logger.info
     def _report():
@@ -279,8 +283,15 @@ def run_analyze(
     results: list[dict] = []
     budget_hit = False
     auth_failed = False
+    cancelled = False
     _report()  # emit total up-front so the UI can show 0/N immediately
     for job in jobs:
+        if should_stop and should_stop():
+            # HALTED: a stop was requested (e.g. from the dashboard). Break cleanly
+            # so the already-scored jobs are kept and recorded; the rest are skipped.
+            cancelled = True
+            log(f"  ⏹ triage halted by request after {totals['scored']} scored")
+            break
         try:
             tri, u = (_score_cli(model, rubric, job) if use_cli
                       else _score(client, model, rubric, job))
@@ -322,7 +333,8 @@ def run_analyze(
         })
         log(f"  ✓ {tri.score}/10 {job.get('company')} | {job.get('title')} — {tri.reason}")
 
-    note = "auth failed" if auth_failed else ("rate/usage limit" if budget_hit else "")
+    note = ("auth failed" if auth_failed else "rate/usage limit" if budget_hit
+            else "halted" if cancelled else "")
     s = Store(db_path)
     s.record_llm_run(
         run_id, stage="triage", model=model,
@@ -336,7 +348,8 @@ def run_analyze(
         f"triage complete — scored {totals['scored']}, errors {totals['errors']} — "
         f"{usage['input_tokens']:,} in ({usage['cache_read_tokens']:,} cached) / "
         f"{usage['output_tokens']:,} out ≈ ${cost:.4f}"
-        + ("  ⛔ AUTH FAILED" if auth_failed else "  ⛔ BUDGET HIT" if budget_hit else "")
+        + ("  ⛔ AUTH FAILED" if auth_failed else "  ⛔ BUDGET HIT" if budget_hit
+           else "  ⏹ HALTED" if cancelled else "")
     )
     return {
         "started": started.isoformat(),
@@ -347,5 +360,6 @@ def run_analyze(
         "cost_usd": round(cost, 4),
         "budget_hit": budget_hit,
         "auth_failed": auth_failed,
+        "cancelled": cancelled,
         "results": results,
     }
