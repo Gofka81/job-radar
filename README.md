@@ -1,47 +1,60 @@
 # job-hunt
 
-Deterministic UK job-discovery pipeline. Inspired by [santifer/career-ops](https://github.com/santifer/career-ops),
-but it owns the half career-ops is weak at: **discovery**.
+Deterministic UK job-discovery pipeline for Data Engineering roles — scans job sources on a schedule,
+filters and dedups without touching an LLM, and serves the shortlist to a phone-friendly dashboard.
 
 ## The idea
 
-A job search split into tiers by what each one *should* cost:
+A job search split into two tiers by what each one *should* cost:
 
 - **Discovery** (find jobs, filter, dedup) — pure HTTP + SQL. **Zero LLM tokens.** The core of this repo.
 - **Triage** (a quick 0–10 fit score per role) — a cheap, bounded, *optional* on-server LLM pass so you
   can rank the shortlist from your phone. Runs on your Claude **Pro subscription** via Claude Code
   headless (no per-token cost), or the metered API. Clearly separated from discovery.
-- **Deep evaluation** (full report, tailor CV, draft answers) — heavier LLM work, delegated to
-  [career-ops](https://github.com/santifer/career-ops) on your PC under human review.
 
-`job-hunt` scans UK sources on a schedule, filters + dedups, **triages the survivors** for fit, and feeds
-the best into career-ops — **LLM cost only on jobs that survive filtering, never the raw firehose.** The
-locked principle holds: **discovery is deterministic; triage is bounded and opt-in; deep eval is supervised.**
+`job-hunt` scans UK sources on a schedule, filters + dedups, and **triages the survivors** for fit —
+**LLM cost only on jobs that survive filtering, never the raw firehose.** The locked principle holds:
+**discovery is deterministic; triage is bounded and opt-in.**
 
 ## Screenshots
 
 The dashboard is phone-first and talks to the API over a Cloudflare Tunnel. Everything below runs on
 **synthetic demo data** (`scripts/seed_demo.py` — fake companies, real tech stacks), not live listings.
 
-![Scored inbox — colour-coded fit badges, salary, source, multi-city chips](assets/dashboard-inbox.png)
+**The Jobs inbox** — deterministic discovery fills the list; the optional LLM triage adds the 0–10 fit
+badge and one-line reason. One row per vacancy: the **London +1** chip means the same posting was found in
+several cities and collapsed to a single row.
 
-*The Jobs inbox. Deterministic discovery fills the list; the optional LLM triage adds the 0–9 fit badge
-and one-line reason on the left. One row per vacancy — the **London +1** chip means the same posting was
-found in several cities and collapsed to a single row.*
+<img src="assets/dashboard-inbox.png" width="100%" alt="Scored inbox — colour-coded fit badges, salary, source, multi-city chips">
 
-### Search the JD, not just the title · Track a role through the pipeline
+### Full-text JD search
 
-| Full-text JD search | Kanban tracker |
-|---|---|
-| ![Typing spark filters the list from 13 to 9](assets/dashboard-search.gif) | ![Moving a saved role to Applied](assets/dashboard-tracker-move.gif) |
-| Type `spark` — it matches roles whose **description** mentions it even when the title doesn't (13 → 9). | Saved → Applied → Rejected, one click per stage. Opening a job auto-marks it viewed. |
+Type `databricks` — it matches roles whose **description** mentions it even when the title doesn't, so the
+list narrows from 13 to 4.
 
-### More views
+<img src="assets/dashboard-search.gif" width="100%" alt="Typing databricks filters the inbox from 13 to 4 matches">
 
-| Tracker board | Config over the wire | Phone |
-|:---:|:---:|:---:|
-| ![Tracker kanban board](assets/dashboard-tracker.png) | ![Editing connectors in the config form](assets/dashboard-config.png) | <img src="assets/dashboard-phone.png" width="240"> |
-| Saved / Applied / Rejected columns | Toggle every connector, edit filters & rubric — no redeploy | Responsive, with a bottom nav bar |
+### Track a role through the pipeline
+
+The **📌 Tracker** is a kanban board — Saved → Applied → Rejected, one click per stage (or drag a card).
+Opening a job auto-marks it viewed.
+
+<img src="assets/dashboard-tracker-move.gif" width="100%" alt="A cursor clicks Applied and the card moves to the Applied column">
+
+<img src="assets/dashboard-tracker.png" width="100%" alt="Tracker kanban board — Saved, Applied, Rejected columns">
+
+### Config over the wire
+
+Toggle every connector and edit filters & the triage rubric from the browser — validated server-side,
+applied on the next scan, no redeploy.
+
+<img src="assets/dashboard-config.png" width="100%" alt="Editing connectors in the config form">
+
+### Phone
+
+The whole dashboard is responsive, with a bottom nav bar.
+
+<img src="assets/dashboard-phone.png" width="300" alt="Phone view of the inbox">
 
 ## Features
 
@@ -91,8 +104,8 @@ found in several cities and collapsed to a single row.*
   `/analyze` (run triage), `/funnel`, `/scan`, with inline buttons.
 
 **Sync & ops**
-- **HTTP API** to career-ops — `GET /api/pending` (shortlist out) / `POST /api/results` (verdicts back),
-  bearer-token, over a Cloudflare Tunnel. The PC `job-bridge` pulls/pushes; the server's DuckDB stays the
+- **HTTP API** — bearer-token, over a Cloudflare Tunnel. The dashboard and Telegram bot are its clients
+  (`/api/jobs`, `/api/funnel`, `/api/scan`, `/api/analyze`, `/api/config`); the server's DuckDB is the
   single source of truth.
 - **Config over the wire** — `GET/POST /api/config`, stored on the data volume, never in git.
 - **Deployed via Portainer GitOps** from this public repo; secrets are stack env vars.
@@ -107,22 +120,13 @@ flowchart LR
     SCANBTN["POST /api/scan<br/>on-demand"] --> SCAN
     SCAN["filter → dedup"] --> DB[("DuckDB<br/>sole writer")]
     TRIAGE["LLM triage (opt-in)<br/>claude-cli · Pro sub"] -.->|score + reason| DB
-    DB --> EP["/api/pending · /api/funnel<br/>/api/jobs · /api/config"]
+    DB --> EP["/api/jobs · /api/funnel<br/>/api/config · /api/analyze"]
   end
-  subgraph PC["Your PC — on-demand · supervised"]
-    direction TB
-    PULL["job-bridge pull"] --> COPS["career-ops<br/>evaluate · tailor CV · PDF"] --> PUSH["job-bridge push"]
-  end
-  DASH["Dashboard / Telegram"] <--> EP
-  EP <==>|"HTTPS · Cloudflare Tunnel · bearer token"| PULL
-  PUSH -->|verdicts| EP
+  DASH["📱 Dashboard / Telegram"] <==>|"HTTPS · Cloudflare Tunnel · bearer token"| EP
 ```
 
 One process owns the database — it serves the API/dashboard **and** runs both the scheduled and
-on-demand scans, so there's a single DB writer and no lock fights. The PC only reads the shortlist
-and posts back verdicts; the server's DuckDB is the single source of truth. No shared git repo.
-
-Evaluation needs a logged-in Claude and human review, so it stays on your PC. Discovery needs neither,
+on-demand scans, so there's a single DB writer and no lock fights. Discovery needs no login and no human,
 so it runs unattended on the server. Deployed via **Portainer GitOps** from this public repo; secrets are
 Portainer stack env vars and `config.yml` is edited through `/api/config` — neither lives in git.
 
@@ -161,12 +165,11 @@ both unset to run discovery-only.
 | Adzuna (`gb`) | Broad UK aggregator (Reed/Totaljobs/CV-Library/company sites), nationwide |
 | Reed | Direct UK, nationwide |
 | Indeed | Indeed's mobile API — also covers Glassdoor (shared index); no login/key |
-| LinkedIn | Public **guest** jobs endpoint (no login/cookie); deep-scan cadence, opt-in |
+| LinkedIn | Public **guest** jobs endpoint (no login/cookie/key), only per-IP rate limiting; opt-in |
 | Greenhouse / Lever / Ashby | UK + global companies (board slugs; vanity-domain boards work too) |
 | Workable | Companies on Workable (e.g. Starling, Hugging Face) |
 | Workday | Self-hosted enterprise sites (`{host, site}` per tenant — e.g. Live Nation, CrowdStrike) |
 | Oracle ORC | Self-hosted CandidateExperience sites (e.g. JPMorgan, Goldman Sachs, Bank of England) |
 
-Adding a source is one file + one registry line. Anything without a structured API (bespoke portals,
-one-off boards) → paste the URL into career-ops's `pipeline.md` manually. That's the designed fallback,
-not a gap.
+Adding a source is one file + one registry line. The connectors target sources with a clean HTTP/JSON
+surface; anything without one (bespoke portals, one-off boards) is out of scope by design.
