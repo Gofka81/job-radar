@@ -1,4 +1,4 @@
-# job-hunt
+# job-radar
 
 Deterministic job-discovery pipeline — scans job sources on a schedule, filters and dedups without
 touching an LLM, and serves the shortlist to a phone-friendly dashboard. Fully config-driven: point it at
@@ -13,7 +13,8 @@ A job search split into two tiers by what each one *should* cost:
   can rank the shortlist from your phone. Runs on your Claude **Pro subscription** via Claude Code
   headless (no per-token cost), or the metered API. Clearly separated from discovery.
 
-`job-hunt` scans your configured sources on a schedule, filters + dedups, and **triages the survivors** for fit —
+`job-radar` scans your configured sources on a schedule, filters + dedups, and **triages the survivors** for fit —
+
 **LLM cost only on jobs that survive filtering, never the raw firehose.** The locked principle holds:
 **discovery is deterministic; triage is bounded and opt-in.**
 
