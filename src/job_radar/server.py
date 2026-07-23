@@ -11,12 +11,14 @@ The server is the only writer of the DB; the PC only reads pending + posts verdi
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
 import threading
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -381,6 +383,22 @@ def create_app(db_path: str | None = None) -> FastAPI:
         """Last scan's result + whether one is running now."""
         return {"running": _scan_status["running"], "last": _scan_status["last"]}
 
+    @app.get("/api/scheduler")
+    def scheduler_get(_: None = Depends(require_token)) -> dict:
+        """Live crawler + triage schedules ({enabled, hours}) and whether each is
+        running right now. Seeded from env, edited here (Settings → Scheduling)."""
+        _ensure_sched()
+        return {**_SCHED_STATE, "running": _SCHED is not None,
+                "scan_active": _scan_status["running"],
+                "triage_active": _analyze_state["running"]}
+
+    @app.post("/api/scheduler")
+    def scheduler_set(payload: dict = Body(...), _: None = Depends(require_token)) -> dict:
+        """Retime or halt the crawler / triage — {scan|triage: {enabled, hours}}.
+        Persists + reschedules live (no redeploy). Empty/disabled = halted."""
+        _ensure_sched()
+        return {"saved": True, **_set_sched(db, payload)}
+
     @app.post("/api/analyze", status_code=202)
     def analyze_now(
         payload: AnalyzePayload, _: None = Depends(require_token)
@@ -448,30 +466,113 @@ def create_app(db_path: str | None = None) -> FastAPI:
 app = create_app()
 
 
-def _start_scheduler(db: str) -> None:
-    """In-process cron scheduler — replaces supercronic. Fires scans through the
-    same single-flight _guarded_scan, so the server is the sole DB writer. The
-    schedule (default '7-19/2' = every 2h, 07:00–19:00) uses the container's
-    local time (TZ env), and respects the on-demand lock."""
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.cron import CronTrigger
+# --- runtime scheduling (crawler + triage) -----------------------------------
+# Two in-process cron jobs: the scan (crawler) and the LLM triage. Env vars are only
+# the DEFAULT SEED at first boot — the live schedules are editable from Settings
+# (GET/POST /api/scheduler) and persisted to a small JSON file on the volume, so you
+# can retime or HALT crawling/triage with no redeploy. Both fire through the existing
+# single-flight paths (_guarded_scan / _enqueue_analyze), so all safety still applies.
+_SCHED = None                       # the BackgroundScheduler (None until started)
+_SCHED_STATE: dict = {}             # {"scan": {enabled, hours}, "triage": {enabled, hours}}
 
-    hours = os.environ.get("SCAN_HOURS", "7-19/2")
-    sched = BackgroundScheduler()
-    sched.add_job(lambda: _guarded_scan(db, deep=False), CronTrigger(hour=hours, minute=0))
-    # Deep scan is MANUAL by default (the 🔭 button / POST /api/scan?deep=1) — run it
-    # once to load the week, then occasionally (e.g. weekly) to refresh. This optional
-    # cron is OFF unless DEEP_SCAN_HOURS is set; if you do set it, prefer a single hour
-    # (e.g. "8") rather than something frequent — a deep scan is a backlog pull, not the
-    # hourly job. DEEP_SCAN_DOW (cron day-of-week, e.g. "mon") narrows it to weekly.
+
+def _sched_path() -> str:
+    return os.environ.get("JOB_RADAR_SCHED") or str(Path(DEFAULT_DB).parent / "scheduling.json")
+
+
+def _sched_seed() -> dict:
+    """Default state from env: an env var UNSET → use the built-in default; env SET
+    but empty ("") → that job off; env set → on with that cron hour field."""
+    def one(env_name: str, dflt_hours: str, dflt_on: bool) -> dict:
+        v = os.environ.get(env_name)
+        if v is None:
+            return {"enabled": dflt_on, "hours": dflt_hours}
+        if v.strip() == "":
+            return {"enabled": False, "hours": dflt_hours}
+        return {"enabled": True, "hours": v.strip()}
+    return {"scan": one("SCAN_HOURS", "7-19/2", True),
+            "triage": one("ANALYZE_HOURS", "3", False)}
+
+
+def _load_sched() -> None:
+    global _SCHED_STATE
+    try:
+        with open(_sched_path()) as f:
+            saved = json.load(f)
+        seed = _sched_seed()
+        for k in ("scan", "triage"):                 # merge so new keys pick up defaults
+            seed[k].update(saved.get(k) or {})
+        _SCHED_STATE = seed
+    except Exception:
+        _SCHED_STATE = _sched_seed()
+
+
+def _ensure_sched() -> None:
+    """Populate _SCHED_STATE lazily — for when the scheduler isn't started
+    (SCAN_SCHEDULER=0) but the API still needs to read/write the schedules."""
+    if not _SCHED_STATE:
+        _load_sched()
+
+
+def _save_sched() -> None:
+    try:
+        p = Path(_sched_path())
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(_SCHED_STATE))
+    except Exception:
+        logger.exception("could not persist scheduling state")
+
+
+def _reschedule(db: str) -> None:
+    """Apply _SCHED_STATE to the live scheduler (idempotent — clears + re-adds).
+    No-op if the scheduler isn't running (SCAN_SCHEDULER=0)."""
+    if _SCHED is None:
+        return
+    from apscheduler.triggers.cron import CronTrigger
+    _SCHED.remove_all_jobs()
+    scan = _SCHED_STATE.get("scan") or {}
+    if scan.get("enabled") and scan.get("hours"):
+        _SCHED.add_job(lambda: _guarded_scan(db, deep=False),
+                       CronTrigger(hour=scan["hours"], minute=0), id="scan")
+    triage = _SCHED_STATE.get("triage") or {}
+    if triage.get("enabled") and triage.get("hours"):
+        minute = os.environ.get("ANALYZE_MINUTE", "20")   # after the scan (minute 0) adds jobs
+        _SCHED.add_job(lambda: _enqueue_analyze(db, "batch", None),
+                       CronTrigger(hour=triage["hours"], minute=minute), id="triage")
+    # Deep scan stays a manual/env-only backlog pull (the 🔭 button / DEEP_SCAN_HOURS).
     deep_hours = os.environ.get("DEEP_SCAN_HOURS")
     if deep_hours:
-        dow = os.environ.get("DEEP_SCAN_DOW", "*")  # default every day; set e.g. "mon" for weekly
-        sched.add_job(lambda: _guarded_scan(db, deep=True),
-                      CronTrigger(day_of_week=dow, hour=deep_hours, minute=30))
-        logger.info("deep scan scheduled — dow=%s hour=%s", dow, deep_hours)
-    sched.start()
-    logger.info("scheduler started — scans at hour=%s (TZ=%s)", hours, os.environ.get("TZ", "local"))
+        dow = os.environ.get("DEEP_SCAN_DOW", "*")
+        _SCHED.add_job(lambda: _guarded_scan(db, deep=True),
+                       CronTrigger(day_of_week=dow, hour=deep_hours, minute=30), id="deep")
+    logger.info("scheduler applied — scan=%s triage=%s", _SCHED_STATE.get("scan"),
+                _SCHED_STATE.get("triage"))
+
+
+def _set_sched(db: str, patch: dict) -> dict:
+    """Update scan/triage {enabled, hours} from a partial payload, persist, reschedule."""
+    for key in ("scan", "triage"):
+        upd = patch.get(key)
+        if isinstance(upd, dict):
+            cur = _SCHED_STATE.setdefault(key, {"enabled": False, "hours": ""})
+            if "enabled" in upd:
+                cur["enabled"] = bool(upd["enabled"])
+            if "hours" in upd:
+                cur["hours"] = str(upd["hours"]).strip()
+    _save_sched()
+    _reschedule(db)
+    return {"scan": _SCHED_STATE.get("scan"), "triage": _SCHED_STATE.get("triage")}
+
+
+def _start_scheduler(db: str) -> None:
+    """Start the in-process scheduler and apply the persisted/seeded schedules."""
+    from apscheduler.schedulers.background import BackgroundScheduler
+    global _SCHED
+    _load_sched()
+    _SCHED = BackgroundScheduler()
+    _reschedule(db)
+    _SCHED.start()
+    logger.info("scheduler started (TZ=%s)", os.environ.get("TZ", "local"))
 
 
 def _setup_telegram() -> None:

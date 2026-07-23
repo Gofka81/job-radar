@@ -224,6 +224,8 @@ analysis/rubric.md
 data/*.duckdb
 data/*.duckdb.wal
 *.duckdb
+# runtime crawler/triage schedules (per-deploy state, seeded from env)
+scheduling.json
 .venv/
 
 CLAUDE.md

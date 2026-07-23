@@ -203,3 +203,68 @@ def test_guarded_scan_single_flight(monkeypatch, tmp_path):
     finally:
         srv._scan_lock.release()
     assert called == []
+
+
+# --- scheduling: env seed + live reschedule + /api/scheduler -----------------
+class _FakeSched:
+    def __init__(self): self.jobs = {}
+    def add_job(self, fn, trigger, id=None): self.jobs[id] = (fn, trigger)
+    def remove_all_jobs(self): self.jobs.clear()
+    def start(self): pass
+
+
+def test_sched_seed_from_env(monkeypatch):
+    import job_radar.server as srv
+    monkeypatch.delenv("SCAN_HOURS", raising=False)      # unset → default on
+    monkeypatch.setenv("ANALYZE_HOURS", "")              # empty → off
+    seed = srv._sched_seed()
+    assert seed["scan"] == {"enabled": True, "hours": "7-19/2"}
+    assert seed["triage"]["enabled"] is False
+    monkeypatch.setenv("ANALYZE_HOURS", "3")             # set → on with that value
+    assert srv._sched_seed()["triage"] == {"enabled": True, "hours": "3"}
+
+
+def test_reschedule_adds_only_enabled_jobs(monkeypatch):
+    import job_radar.server as srv
+    fake = _FakeSched()
+    monkeypatch.setattr(srv, "_SCHED", fake)
+    monkeypatch.delenv("DEEP_SCAN_HOURS", raising=False)
+    srv._SCHED_STATE.clear()
+    srv._SCHED_STATE.update({"scan": {"enabled": True, "hours": "7-19/2"},
+                             "triage": {"enabled": False, "hours": "3"}})
+    srv._reschedule("db")
+    assert set(fake.jobs) == {"scan"}                    # triage disabled → not scheduled
+    srv._SCHED_STATE["triage"] = {"enabled": True, "hours": "3"}
+    srv._reschedule("db")
+    assert set(fake.jobs) == {"scan", "triage"}          # both now
+    assert "hour='3'" in str(fake.jobs["triage"][1])
+
+
+def test_scheduled_triage_enqueues_batch(monkeypatch):
+    import job_radar.server as srv
+    fake = _FakeSched()
+    monkeypatch.setattr(srv, "_SCHED", fake)
+    monkeypatch.delenv("DEEP_SCAN_HOURS", raising=False)
+    srv._SCHED_STATE.clear()
+    srv._SCHED_STATE.update({"scan": {"enabled": False, "hours": "7-19/2"},
+                             "triage": {"enabled": True, "hours": "3"}})
+    srv._reschedule("db")
+    calls = []
+    monkeypatch.setattr(srv, "_enqueue_analyze", lambda db, kind, ids: calls.append((db, kind, ids)))
+    fake.jobs["triage"][0]()                             # fire the triage job
+    assert calls == [("db", "batch", None)]
+
+
+def test_api_scheduler_get_and_halt(client, monkeypatch):
+    c, _ = client
+    r = c.get("/api/scheduler")
+    assert r.status_code == 200 and "scan" in r.json() and "triage" in r.json()
+    # halt the crawler via the API
+    r = c.post("/api/scheduler", json={"scan": {"enabled": False}})
+    assert r.status_code == 200 and r.json()["scan"]["enabled"] is False
+    assert c.get("/api/scheduler").json()["scan"]["enabled"] is False
+
+
+def test_api_scheduler_requires_token(client):
+    c, _ = client
+    assert TestClient(c.app).get("/api/scheduler").status_code in (401, 403)

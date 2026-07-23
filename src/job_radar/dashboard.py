@@ -349,6 +349,10 @@ DASHBOARD_HTML = r"""<!doctype html>
              padding:7px 11px; font-size:12.5px; font-weight:650; cursor:pointer; align-self:flex-start; }
   .loc-add:hover { border-color:var(--accent); color:var(--accent); }
   .cfg-check { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; cursor:pointer; }
+  .sched-row { display:flex; align-items:center; gap:12px; margin-bottom:9px; }
+  .sched-row .cfg-check { flex:1; }
+  .sched-row input { width:120px; background:var(--bg); border:1px solid var(--line); border-radius:8px;
+                     padding:8px 10px; font-size:13px; min-height:36px; font-family:ui-monospace,Menlo,monospace; }
   .cfg-note { color:var(--muted); font-size:12px; }
   .savebar { position:sticky; bottom:0; z-index:10; display:flex; gap:10px; align-items:center;
              margin-top:14px; padding:12px 0 8px; flex-wrap:wrap;
@@ -523,6 +527,24 @@ DASHBOARD_HTML = r"""<!doctype html>
             <button class="btn primary" id="save2">Save</button>
           </div>
           <div class="hint" id="tokMsg">Kept in this browser only.</div>
+        </div>
+        <div class="set-block">
+          <h3>Scheduling</h3>
+          <div class="sched-row">
+            <label class="cfg-check"><span class="sw"><input type="checkbox" id="schScanEn"><span class="tr"></span></span> Scheduled crawling</label>
+            <input id="schScanHours" placeholder="7-19/2">
+          </div>
+          <div class="sched-row">
+            <label class="cfg-check"><span class="sw"><input type="checkbox" id="schTriageEn"><span class="tr"></span></span> Auto-triage (LLM)</label>
+            <input id="schTriageHours" placeholder="3">
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+            <button class="btn primary" id="schSave">Save</button>
+            <span class="hint" id="schMsg" style="margin:0"></span>
+          </div>
+          <div class="hint">Cron hour field — <code>7-19/2</code> = every 2h 07:00–19:00, <code>3</code> = 03:00 daily.
+            Toggle off to halt. Triage spends Claude Pro quota per run — nightly (<code>3</code>) keeps it off your
+            interactive hours. Seeded from env; edits apply live, no redeploy.</div>
         </div>
       </div>
 
@@ -899,8 +921,33 @@ function showSetTab(t) {
   $("#rubricView").style.display  = t==="rubric"  ? "" : "none";
   $("#usageView").style.display   = t==="usage"   ? "" : "none";
   $("#setTitle").textContent = { general:"General", config:"Config", rubric:"Rubric", usage:"Usage" }[t] || "";
-  if (t==="general") setThemeSeg(localStorage.getItem(THEME_KEY) || "");
+  if (t==="general") { setThemeSeg(localStorage.getItem(THEME_KEY) || ""); loadScheduler(); }
   else if (LOADERS[t]) LOADERS[t]();     // load config/rubric/usage on entry
+}
+
+// --- scheduling (crawler + triage on/off + cron hours) ---
+async function loadScheduler() {
+  if (!TOKEN) return;
+  try {
+    const s = await (await api("/api/scheduler")).json();
+    $("#schScanEn").checked   = !!(s.scan && s.scan.enabled);
+    $("#schScanHours").value  = (s.scan && s.scan.hours) || "";
+    $("#schTriageEn").checked = !!(s.triage && s.triage.enabled);
+    $("#schTriageHours").value= (s.triage && s.triage.hours) || "";
+    $("#schMsg").textContent  = "";
+  } catch(e){ if (e.message!=="auth") $("#schMsg").textContent = "Error: "+e.message; }
+}
+async function saveScheduler() {
+  $("#schMsg").textContent = "saving…";
+  const body = {
+    scan:   { enabled: $("#schScanEn").checked,   hours: $("#schScanHours").value.trim() },
+    triage: { enabled: $("#schTriageEn").checked, hours: $("#schTriageHours").value.trim() },
+  };
+  try {
+    const r = await api("/api/scheduler", {
+      method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+    $("#schMsg").textContent = r.ok ? "Saved — applied live." : "Error: HTTP "+r.status;
+  } catch(e){ if (e.message!=="auth") $("#schMsg").textContent = "Error: "+e.message; }
 }
 function refreshView(){
   if (VIEW==="settings") { if (SETTAB!=="menu" && SETTAB!=="general" && LOADERS[SETTAB]) LOADERS[SETTAB](); }
@@ -1423,6 +1470,7 @@ $("#tokReveal").onclick = () => {   // masked by default; eye toggles reveal
   t.type = show ? "text" : "password";
   $("#tokReveal").innerHTML = show ? ICON.eyeOff : ICON.eye;
 };
+$("#schSave").onclick = saveScheduler;
 $("#trkReload").onclick = loadTracker;
 $("#cfgSave").onclick = saveConfig;
 $("#cfgReload").onclick = loadConfig;
