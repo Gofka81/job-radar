@@ -218,6 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- job-hunt project ---
+.DS_Store
 .env
 config.yml
 analysis/rubric.md
