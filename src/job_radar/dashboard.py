@@ -818,7 +818,8 @@ function setPage(n){
   $("#list").scrollIntoView({ behavior: "smooth", block: "start" });  // start the new page at the top
 }
 function salaryStr(j) {
-  const k = n => "£" + Math.round(n/1000) + "k";
+  const sym = { GBP:"£", USD:"$", EUR:"€" }[j.currency] || "£";
+  const k = n => sym + Math.round(n/1000) + "k";
   const lo = j.salary_min, hi = j.salary_max;
   if (lo && hi) return lo === hi ? k(lo) : `${k(lo)}–${k(hi)}`;
   if (hi) return `≤ ${k(hi)}`;

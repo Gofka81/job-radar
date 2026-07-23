@@ -1,7 +1,8 @@
 # job-hunt
 
-Deterministic UK job-discovery pipeline for Data Engineering roles — scans job sources on a schedule,
-filters and dedups without touching an LLM, and serves the shortlist to a phone-friendly dashboard.
+Deterministic job-discovery pipeline — scans job sources on a schedule, filters and dedups without
+touching an LLM, and serves the shortlist to a phone-friendly dashboard. Fully config-driven: point it at
+any roles, tech stack, and locations you like.
 
 ## The idea
 
@@ -12,25 +13,25 @@ A job search split into two tiers by what each one *should* cost:
   can rank the shortlist from your phone. Runs on your Claude **Pro subscription** via Claude Code
   headless (no per-token cost), or the metered API. Clearly separated from discovery.
 
-`job-hunt` scans UK sources on a schedule, filters + dedups, and **triages the survivors** for fit —
+`job-hunt` scans your configured sources on a schedule, filters + dedups, and **triages the survivors** for fit —
 **LLM cost only on jobs that survive filtering, never the raw firehose.** The locked principle holds:
 **discovery is deterministic; triage is bounded and opt-in.**
 
 ## Features
 
-*Screens below use **synthetic demo data** (`scripts/seed_demo.py` — fake companies, real tech stacks),
-not live listings.*
+*Screens below use **synthetic demo data** (`scripts/seed_demo.py`), configured for generic US
+software-engineering roles — fake companies, not live listings.*
 
 ### Discovery — deterministic, zero LLM tokens
 
 - **10 source connectors** — Adzuna + Reed + Indeed (aggregators; Indeed also covers Glassdoor), LinkedIn
   (public guest endpoint), Greenhouse / Lever / Ashby / Workable (company ATS boards), and Workday / Oracle
   ORC (self-hosted enterprise sites). Adding a source is one file + one registry line.
-- **Per-location targeting** — each priority area (Edinburgh / Glasgow / London / nationwide) gets its own
-  date-sorted query budget, so high-volume London can't crowd Scotland out of the results.
+- **Per-location targeting** — each priority area (your target metros + a nationwide pass) gets its own
+  date-sorted query budget, so one high-volume metro can't crowd the smaller ones out of the results.
 - **Server-side narrowing** — Adzuna `category=it-jobs`, full-text `what_exclude`, and a tight
   `max_days_old` window keep the result budget focused (and under the API's daily call limit).
-- **Title + location filters** — case-insensitive include/exclude lists, kept broad (all UK + remote).
+- **Title + location filters** — case-insensitive include/exclude lists, kept as broad or tight as you want.
 - **Full-JD enrichment** — aggregator search APIs return a ~450-char snippet; for sources with a detail
   API (Reed) the full JD is fetched once after filter+merge (a `jd_full` flag → fetched exactly once) and
   stored back, so triage and search work on the real text, not a snippet.
@@ -44,10 +45,10 @@ for the first load or a weekly top-up.
 ### Find the stack — full-text JD search & dedup
 
 Each inbox row is **one vacancy** — the **London +1** chip means the same posting was found in several
-cities and collapsed. Search runs server-side over the **description**, so `databricks` finds roles even
+cities and collapsed. Search runs server-side over the **description**, so `kubernetes` finds roles even
 when it isn't in the title (here the list narrows from 13 to 4).
 
-<img src="assets/dashboard-search.gif" width="100%" alt="Typing databricks filters the inbox from 13 to 4 matches">
+<img src="assets/dashboard-search.gif" width="100%" alt="Typing kubernetes filters the inbox from 13 to 4 matches">
 
 - **Write-time dedup** — identity is `vacancy_key = sha1(company | title)`, source- and city-agnostic:
   tracking-token variants, agency reposts under new ad-ids, the *same ad on multiple sources*, and the
@@ -84,10 +85,11 @@ jobs leave the inbox but are never lost.
 
 ### Config & rubric over the wire
 
-Toggle every connector and edit filters & the triage rubric from the browser (`/api/config`,
-`/api/rubric`) — validated server-side, applied on the next scan/run, no redeploy.
+Expand any connector, the LLM-triage engine, or the always-on title/location filters and edit them from
+the browser (`/api/config`, `/api/rubric`) — validated server-side, applied on the next scan/run, no
+redeploy.
 
-<img src="assets/dashboard-config.png" width="100%" alt="Editing connectors in the config form">
+<img src="assets/dashboard-config.gif" width="100%" alt="Expanding connectors, LLM-triage, and the filters section in the config form">
 
 ### Phone & notifications
 
@@ -155,11 +157,11 @@ both unset to run discovery-only.
 
 | Provider | Covers |
 |----------|--------|
-| Adzuna (`gb`) | Broad UK aggregator (Reed/Totaljobs/CV-Library/company sites), nationwide |
-| Reed | Direct UK, nationwide |
+| Adzuna | Broad aggregator (multi-country via `country`), nationwide |
+| Reed | Direct UK job board, nationwide |
 | Indeed | Indeed's mobile API — also covers Glassdoor (shared index); no login/key |
 | LinkedIn | Public **guest** jobs endpoint (no login/cookie/key), only per-IP rate limiting; opt-in |
-| Greenhouse / Lever / Ashby | UK + global companies (board slugs; vanity-domain boards work too) |
+| Greenhouse / Lever / Ashby | Companies worldwide (board slugs; vanity-domain boards work too) |
 | Workable | Companies hosting their board on Workable |
 | Workday | Enterprises self-hosting Workday (`{host, site}` per tenant) |
 | Oracle ORC | Enterprises on Oracle Cloud Recruiting (self-hosted CandidateExperience sites) |

@@ -221,6 +221,7 @@ __marimo__/
 .DS_Store
 .env
 config.yml
+scripts/demo_config.yml
 analysis/rubric.md
 data/*.duckdb
 data/*.duckdb.wal
