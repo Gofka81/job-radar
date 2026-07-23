@@ -256,7 +256,6 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   /* ---- settings gear + iOS-style sub-pages ---- */
   .iconbtn.on { color:var(--accent); border-color:var(--accent); }
-  .set-menu { max-width:560px; }
   .set-menu > .st-h { display:block; font-size:18px; font-weight:750; margin-bottom:12px; text-align:center; }
   .set-menu-card { background:var(--card); border:1px solid var(--line); border-radius:12px;
                    box-shadow:var(--shadow); overflow:hidden; }
@@ -414,7 +413,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
 <div class="wrap">
   <div id="auth">
-    <input id="token" type="text" placeholder="API token" autocomplete="off">
+    <input id="token" type="password" placeholder="API token" autocomplete="off">
     <button class="btn primary" id="save">Save</button>
   </div>
 
@@ -517,9 +516,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <div class="set-block">
           <h3>API token</h3>
-          <div style="display:flex;gap:8px;align-items:center;max-width:440px">
-            <input id="token2" type="text" autocomplete="off" placeholder="API token"
+          <div style="display:flex;gap:8px;align-items:center;max-width:480px">
+            <input id="token2" type="password" autocomplete="off" placeholder="API token"
                    style="flex:1;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:9px 12px;min-height:38px;font-family:ui-monospace,Menlo,monospace">
+            <button class="iconbtn" id="tokReveal" data-icon="eye" title="Show / hide token"></button>
             <button class="btn primary" id="save2">Save</button>
           </div>
           <div class="hint" id="tokMsg">Kept in this browser only.</div>
@@ -629,6 +629,8 @@ const ICON = {
   bookmark: _svg('<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>'),
   ban: _svg('<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>'),
   refresh: _svg('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
+  eye: _svg('<path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/>'),
+  eyeOff: _svg('<path d="M10.73 5.08A10.74 10.74 0 0 1 21.94 11.65a1 1 0 0 1 0 .7 10.75 10.75 0 0 1-1.44 2.49"/><path d="M14.08 14.16a3 3 0 0 1-4.24-4.24"/><path d="M17.48 17.5A10.75 10.75 0 0 1 2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 4.45-5.14"/><path d="m2 2 20 20"/>'),
 };
 function paintIcons(root=document){ root.querySelectorAll("[data-icon]").forEach(e => {
   const n = e.dataset.icon; if (ICON[n]) e.innerHTML = ICON[n]; }); }
@@ -1416,6 +1418,11 @@ $("#save").onclick = () => { TOKEN = $("#token").value.trim(); localStorage.setI
   $("#token2").value = TOKEN; refreshView(); };
 $("#save2").onclick = () => { TOKEN = $("#token2").value.trim(); localStorage.setItem("jr_token", TOKEN);
   $("#token").value = TOKEN; $("#tokMsg").textContent = "Saved — kept in this browser only."; refreshView(); };
+$("#tokReveal").onclick = () => {   // masked by default; eye toggles reveal
+  const t = $("#token2"), show = t.type === "password";
+  t.type = show ? "text" : "password";
+  $("#tokReveal").innerHTML = show ? ICON.eyeOff : ICON.eye;
+};
 $("#trkReload").onclick = loadTracker;
 $("#cfgSave").onclick = saveConfig;
 $("#cfgReload").onclick = loadConfig;
