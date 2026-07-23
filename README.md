@@ -16,57 +16,13 @@ A job search split into two tiers by what each one *should* cost:
 **LLM cost only on jobs that survive filtering, never the raw firehose.** The locked principle holds:
 **discovery is deterministic; triage is bounded and opt-in.**
 
-## Screenshots
-
-The dashboard is phone-first and talks to the API over HTTP. Everything below runs on **synthetic demo
-data** (`scripts/seed_demo.py` — fake companies, real tech stacks), not live listings.
-
-### Find a job — full-text JD search
-
-The inbox is deterministic discovery; each row is one vacancy (the **London +1** chip means the same
-posting was found in several cities and collapsed). Type `databricks` and it matches roles whose
-**description** mentions it even when the title doesn't — the list narrows from 13 to 4.
-
-<img src="assets/dashboard-search.gif" width="100%" alt="Typing databricks filters the inbox from 13 to 4 matches">
-
-### Triage — pick jobs, they queue, scores land
-
-The optional LLM pass scores each pending job 0–10 against your rubric. Hit **Analyze** (or the ✨ on a
-single card); jobs go into a queue that drains with live progress, and the fit badge + one-line reason
-fill in as each completes.
-
-<img src="assets/dashboard-analyze.gif" width="100%" alt="Clicking Analyze queues jobs and fit-score badges fill in as scoring completes">
-
-### Track a role through the pipeline
-
-The **📌 Tracker** is a kanban board — Saved → Applied → Rejected, one click per stage (or drag a card).
-Opening a job auto-marks it viewed.
-
-<img src="assets/dashboard-tracker-move.gif" width="100%" alt="A cursor clicks Applied and the card moves to the Applied column">
-
-### Two scan depths
-
-Every scan honours a window. **Scan now** pulls only the recent window (`recent_days`) — cheap, fresh-only,
-for the regular schedule. **Deep scan** pulls the full window — for the first load or a weekly top-up.
-
-<img src="assets/dashboard-scan.png" width="440" alt="Scan menu: Scan now (recent window) vs Deep scan (full window)">
-
-### Config over the wire
-
-Toggle every connector and edit filters & the triage rubric from the browser — validated server-side,
-applied on the next scan, no redeploy.
-
-<img src="assets/dashboard-config.png" width="100%" alt="Editing connectors in the config form">
-
-### Phone
-
-The whole dashboard is responsive, with a bottom nav bar.
-
-<p align="center"><img src="assets/dashboard-phone.png" width="300" alt="Phone view of the inbox"></p>
-
 ## Features
 
-**Discovery (deterministic — zero LLM tokens)**
+*Screens below use **synthetic demo data** (`scripts/seed_demo.py` — fake companies, real tech stacks),
+not live listings.*
+
+### Discovery — deterministic, zero LLM tokens
+
 - **10 source connectors** — Adzuna + Reed + Indeed (aggregators; Indeed also covers Glassdoor), LinkedIn
   (public guest endpoint), Greenhouse / Lever / Ashby / Workable (company ATS boards), and Workday / Oracle
   ORC (self-hosted enterprise sites). Adding a source is one file + one registry line.
@@ -75,46 +31,75 @@ The whole dashboard is responsive, with a bottom nav bar.
 - **Server-side narrowing** — Adzuna `category=it-jobs`, full-text `what_exclude`, and a tight
   `max_days_old` window keep the result budget focused (and under the API's daily call limit).
 - **Title + location filters** — case-insensitive include/exclude lists, kept broad (all UK + remote).
-- **Deep vs regular scans** — a 🔭 deep scan pulls the full window (initial / weekly full load); regular
-  scheduled scans use a tighter `recent_days` window — cheaper, fresh-only.
 - **Full-JD enrichment** — aggregator search APIs return a ~450-char snippet; for sources with a detail
   API (Reed) the full JD is fetched once after filter+merge (a `jd_full` flag → fetched exactly once) and
   stored back, so triage and search work on the real text, not a snippet.
 
-**Dedup & lifecycle**
+**Two scan depths** — every scan honours a window. **Scan now** pulls only the recent window
+(`recent_days`) — cheap, fresh-only, for the regular schedule. **🔭 Deep scan** pulls the full window —
+for the first load or a weekly top-up.
+
+<p align="center"><img src="assets/dashboard-scan.png" width="440" alt="Scan menu: Scan now (recent window) vs Deep scan (full window)"></p>
+
+### Find the stack — full-text JD search & dedup
+
+Each inbox row is **one vacancy** — the **London +1** chip means the same posting was found in several
+cities and collapsed. Search runs server-side over the **description**, so `databricks` finds roles even
+when it isn't in the title (here the list narrows from 13 to 4).
+
+<img src="assets/dashboard-search.gif" width="100%" alt="Typing databricks filters the inbox from 13 to 4 matches">
+
 - **Write-time dedup** — identity is `vacancy_key = sha1(company | title)`, source- and city-agnostic:
   tracking-token variants, agency reposts under new ad-ids, the *same ad on multiple sources*, and the
-  *same posting listed in several cities* all collapse to one row. City is an attribute — a multi-city
-  posting accumulates a `locations` set (shown as a chip + "+N"), so no opening is lost.
+  *same posting listed in several cities* all collapse to one row. City becomes a chip + "+N", so no
+  opening is lost.
 - **Closed-job expiry + generations** — a job that drops off its source for `expire_after_hours` is marked
-  `expired`; the same window is the dedup horizon, so a posting that *reappears after expiring* gets a
-  fresh row (a new evaluation), while the old one is kept as history.
-- **Single DB writer** — one process owns DuckDB (scheduled + on-demand scans + API), no lock fights.
+  `expired`; if it *reappears after expiring* it gets a fresh row (a new evaluation), the old one kept as
+  history.
 
-**Triage (optional on-server LLM — bounded, opt-in)**
-- **0–10 fit scoring** — scores each pending job against a personal rubric (`analysis/rubric.md`, gitignored)
-  from the stored JD, with a one-line reason. Triggered from the dashboard/phone, never automatically.
-- **Pluggable engine** — `claude-cli` (Claude Code on your Pro subscription, no per-token cost — the default)
-  or `api` (metered Anthropic SDK). Same rubric, forced-JSON output, usage ledger.
-- **Guardrails** — manual-trigger only, `max_jobs` cap per run, single-flight lock, hidden jobs never scored,
-  and a clean stop + alert when a usage/rate limit is hit. A usage view shows calls / tokens per run.
+### Triage — optional on-server LLM, bounded & opt-in
 
-**Dashboard & notifications**
-- **Phone-friendly web dashboard** (`GET /`) — funnel chips, score-ranked job list (colour-coded badges),
-  filters (status / location / source / min-salary), and server-side full-text **JD search** (find *spark*,
-  *airflow* even when not in the title).
-- **Application tracking** — open a job, and on return a popup asks *Applied / Viewed / Not interested*; a
-  **📌 Tracker** tab holds your pipeline (Applied / Rejected) with stage moves. Dismissed jobs hide; applied
-  jobs leave the inbox but are never lost.
-- **Editors over the wire** — edit `config.yml` and the triage `rubric.md` from your phone (`/api/config`,
-  `/api/rubric`); validated, applied on the next scan/run, no redeploy.
-- **Telegram bot** — push notifications on new matches, plus rich score cards: `/jobs [search]`, `/top`,
-  `/analyze` (run triage), `/funnel`, `/scan`, with inline buttons.
+Scores each pending job **0–10** against your rubric (`analysis/rubric.md`) with a one-line reason. Hit
+**Analyze** and every pending job joins a queue; the fit badge fills in as the worker drains it.
 
-**Sync & ops**
+<img src="assets/dashboard-analyze.gif" width="100%" alt="Clicking Analyze queues jobs and fit-score badges fill in as scoring completes">
+
+Or pick jobs one at a time with the **✨** on a card — they line up in the same single-worker queue and
+score one by one.
+
+<img src="assets/dashboard-analyze-manual.gif" width="100%" alt="Clicking the sparkle on individual cards queues them and scores land one by one">
+
+- **Pluggable engine** — `claude-cli` (Claude Code on your Pro subscription, no per-token cost — the
+  default) or `api` (metered Anthropic SDK). Same rubric, forced-JSON output, usage ledger.
+- **Guardrails** — manual-trigger only, `max_jobs` cap per run, single-flight lock, hidden jobs never
+  scored, and a clean stop + alert when a usage/rate limit is hit. A usage view shows calls / tokens per run.
+
+### Track your applications
+
+Open a job and a return-popup asks *Applied / Viewed / Not-interested*. The **📌 Tracker** is a kanban
+board — Saved → Applied → Rejected, one click per stage (or drag a card). Dismissed jobs hide; applied
+jobs leave the inbox but are never lost.
+
+<img src="assets/dashboard-tracker-move.gif" width="100%" alt="A cursor clicks Applied and the card moves to the Applied column">
+
+### Config & rubric over the wire
+
+Toggle every connector and edit filters & the triage rubric from the browser (`/api/config`,
+`/api/rubric`) — validated server-side, applied on the next scan/run, no redeploy.
+
+<img src="assets/dashboard-config.png" width="100%" alt="Editing connectors in the config form">
+
+### Phone & notifications
+
+The whole dashboard is responsive, with a bottom nav bar. A **Telegram bot** pushes new-match alerts and
+rich score cards (`/jobs [search]`, `/top`, `/analyze`, `/funnel`, `/scan`, with inline buttons).
+
+<p align="center"><img src="assets/dashboard-phone.png" width="300" alt="Phone view of the inbox"></p>
+
+### Sync & ops
+
 - **HTTP API** — bearer-token. The dashboard and Telegram bot are its clients (`/api/jobs`, `/api/funnel`,
-  `/api/scan`, `/api/analyze`, `/api/config`); the server's DuckDB is the single source of truth.
-- **Config over the wire** — `GET/POST /api/config`, stored on the data volume, never in git.
+  `/api/scan`, `/api/analyze`, `/api/config`); the server's DuckDB is the single source of truth, one writer.
 - **One Docker service** — deploy on any container host; secrets come from the environment.
 
 ## Deployment shape
