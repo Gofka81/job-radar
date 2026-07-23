@@ -134,47 +134,53 @@ def _page(cfg_q: str, where: str, distance, hours: int, limit: int,
 
 def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
     queries = cfg.get("queries", ["data engineer"])
+    # OR-join the queries into ONE boolean search per location (like linkedin), so
+    # overlapping terms ("data engineer" / "data platform") aren't re-fetched under
+    # each query. Indeed's `what` supports boolean OR; title_filter trims post-fetch.
+    kw = " OR ".join(f'"{q}"' for q in queries if q)
+    # Escape backslashes then quotes so the boolean quotes survive as literal `\"`
+    # inside the GraphQL `what: "..."` string (Indeed then reads them as phrase quotes).
+    q_esc = kw.replace("\\", "\\\\").replace('"', '\\"')
     # Per-location targeting (mirror of adzuna/reed) — distance in MILES for Indeed.
     # where="" = nationwide/remote pass.
     locations = cfg_locations(cfg, "where", cfg.get("distance", 40))
     hours = int(cfg.get("hours_old", 168))     # freshness window (last N hours seen)
-    max_pages = int(cfg.get("max_pages", 2))   # cursor pages per query×location
+    max_pages = int(cfg.get("max_pages", 2))   # cursor pages per location
     limit = min(int(cfg.get("results_per_page", 50)), 100)  # Indeed caps at 100
 
     jobs: list[Job] = []
-    for q in queries:
-        # Escape quotes so a query term can't break the GraphQL string.
-        q_esc = (q or "").replace("\\", "\\\\").replace('"', '\\"')
-        for where, distance in locations:
-            cursor = None
-            for _ in range(max_pages):
-                results, cursor = _page(q_esc, where, distance, hours, limit, cursor, http)
-                if not results:
-                    break
-                for job in results:
-                    key = job.get("key")
-                    if not key:
-                        continue
-                    loc = _location(job.get("location") or {})
-                    desc = strip_tags((job.get("description") or {}).get("html", ""))
-                    smin, smax, cur = _salary(job.get("compensation") or {})
-                    jobs.append(
-                        Job(
-                            source=ID,
-                            company=((job.get("employer") or {}).get("name") or "")
-                            if job.get("employer") else "",
-                            title=job.get("title", "") or "",
-                            url=f"{BASE}/viewjob?jk={key}",
-                            location=loc,
-                            description=desc,
-                            posted_at=_posted(job.get("datePublished")),
-                            salary_min=smin,
-                            salary_max=smax,
-                            currency=cur,
-                            remote=_is_remote(job, loc, desc),
-                            raw=job,
-                        )
+    seen: set[str] = set()  # dedup keys across overlapping locations (e.g. city + nationwide)
+    for where, distance in locations:
+        cursor = None
+        for _ in range(max_pages):
+            results, cursor = _page(q_esc, where, distance, hours, limit, cursor, http)
+            if not results:
+                break
+            for job in results:
+                key = job.get("key")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                loc = _location(job.get("location") or {})
+                desc = strip_tags((job.get("description") or {}).get("html", ""))
+                smin, smax, cur = _salary(job.get("compensation") or {})
+                jobs.append(
+                    Job(
+                        source=ID,
+                        company=((job.get("employer") or {}).get("name") or "")
+                        if job.get("employer") else "",
+                        title=job.get("title", "") or "",
+                        url=f"{BASE}/viewjob?jk={key}",
+                        location=loc,
+                        description=desc,
+                        posted_at=_posted(job.get("datePublished")),
+                        salary_min=smin,
+                        salary_max=smax,
+                        currency=cur,
+                        remote=_is_remote(job, loc, desc),
+                        raw=job,
                     )
-                if not cursor:
-                    break
+                )
+            if not cursor:
+                break
     return jobs

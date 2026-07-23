@@ -52,6 +52,10 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
         company = c.get("name") or tenant
         lang = c.get("lang", "en-US")
         cxs = f"https://{host}/wday/cxs/{tenant}/{site}"
+        # Collect unique postings across ALL queries/pages FIRST (keyed by
+        # externalPath), THEN fetch each JD detail exactly once. A req matching
+        # several queries otherwise had its detail re-fetched per query — the N+1.
+        listings: dict[str, dict] = {}
         for q in queries:
             for page in range(max_pages):
                 try:
@@ -68,11 +72,12 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                 postings = data.get("jobPostings") or []
                 for p in postings:
                     path = p.get("externalPath") or ""
-                    if not path:
-                        continue
-                    jobs.extend(_postings(http, cxs, host, lang, site, company, p, path))
+                    if path:
+                        listings.setdefault(path, p)  # first sighting wins; dedups queries
                 if not postings or (page + 1) * _PAGE >= (data.get("total") or 0):
                     break
+        for path, p in listings.items():
+            jobs.extend(_postings(http, cxs, host, lang, site, company, p, path))
     return jobs
 
 

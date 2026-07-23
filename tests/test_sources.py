@@ -144,6 +144,27 @@ def test_workday_emits_job_per_location_with_jd():
 
 
 @respx.mock
+def test_workday_fetches_detail_once_across_overlapping_queries():
+    # Same posting matches both queries — its JD detail must be fetched ONCE (N+1 fix).
+    listing = respx.post(f"{_WD_CXS}/jobs").mock(return_value=httpx.Response(200, json={
+        "total": 1,
+        "jobPostings": [{"title": "Data Engineer", "externalPath": "/job/DE_R1",
+                         "locationsText": "London"}],
+    }))
+    detail = respx.get(f"{_WD_CXS}/job/DE_R1").mock(return_value=httpx.Response(200, json={
+        "jobPostingInfo": {"title": "Data Engineer", "jobDescription": "Spark.",
+                           "location": "London"}
+    }))
+    cfg = {"companies": [{"host": _WD_HOST, "site": "NatWestGroup", "name": "NatWest"}],
+           "queries": ["data engineer", "data platform"], "max_pages": 1}
+    with httpx.Client() as c:
+        jobs = workday.fetch(cfg, c)
+    assert listing.call_count == 2   # one list call per query (searchText differs)
+    assert detail.call_count == 1    # but the shared posting's JD is fetched only once
+    assert len(jobs) == 1
+
+
+@respx.mock
 def test_workday_skips_bad_tenant_without_failing():
     respx.post(url__regex=r".*/wday/cxs/.*/jobs").mock(return_value=httpx.Response(404))
     cfg = {"companies": [{"host": _WD_HOST, "site": "NatWestGroup"},
@@ -252,7 +273,7 @@ def test_indeed_ignores_non_annual_salary_and_blank_key():
 
 
 @respx.mock
-def test_indeed_queries_each_query_and_location():
+def test_indeed_or_joins_queries_per_location():
     body = {"data": {"jobSearch": {"pageInfo": {"nextCursor": None}, "results": []}}}
     route = respx.post("https://apis.indeed.com/graphql").mock(
         return_value=httpx.Response(200, json=body))
@@ -260,7 +281,9 @@ def test_indeed_queries_each_query_and_location():
            "locations": [{"where": "Glasgow", "distance": 40}, {"where": ""}], "max_pages": 1}
     with httpx.Client() as c:
         indeed.fetch(cfg, c)
-    assert route.call_count == 4  # 2 queries × 2 locations
+    assert route.call_count == 2  # queries OR-joined → 1 search per location, not per query
     queries = [json.loads(call.request.content)["query"] for call in route.calls]
+    # both terms OR-joined into ONE `what` (quotes escaped into the GraphQL string)
+    assert all(r'\"data engineer\" OR \"databricks\"' in q for q in queries)
     assert any('where: "Glasgow"' in q for q in queries)
     assert any("location:" not in q for q in queries)  # nationwide pass omits location
