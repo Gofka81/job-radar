@@ -18,21 +18,24 @@ A job search split into two tiers by what each one *should* cost:
 
 ## Screenshots
 
-The dashboard is phone-first and talks to the API over a Cloudflare Tunnel. Everything below runs on
-**synthetic demo data** (`scripts/seed_demo.py` — fake companies, real tech stacks), not live listings.
+The dashboard is phone-first and talks to the API over HTTP. Everything below runs on **synthetic demo
+data** (`scripts/seed_demo.py` — fake companies, real tech stacks), not live listings.
 
-**The Jobs inbox** — deterministic discovery fills the list; the optional LLM triage adds the 0–10 fit
-badge and one-line reason. One row per vacancy: the **London +1** chip means the same posting was found in
-several cities and collapsed to a single row.
+### Find a job — full-text JD search
 
-<img src="assets/dashboard-inbox.png" width="100%" alt="Scored inbox — colour-coded fit badges, salary, source, multi-city chips">
-
-### Full-text JD search
-
-Type `databricks` — it matches roles whose **description** mentions it even when the title doesn't, so the
-list narrows from 13 to 4.
+The inbox is deterministic discovery; each row is one vacancy (the **London +1** chip means the same
+posting was found in several cities and collapsed). Type `databricks` and it matches roles whose
+**description** mentions it even when the title doesn't — the list narrows from 13 to 4.
 
 <img src="assets/dashboard-search.gif" width="100%" alt="Typing databricks filters the inbox from 13 to 4 matches">
+
+### Triage — pick jobs, they queue, scores land
+
+The optional LLM pass scores each pending job 0–10 against your rubric. Hit **Analyze** (or the ✨ on a
+single card); jobs go into a queue that drains with live progress, and the fit badge + one-line reason
+fill in as each completes.
+
+<img src="assets/dashboard-analyze.gif" width="100%" alt="Clicking Analyze queues jobs and fit-score badges fill in as scoring completes">
 
 ### Track a role through the pipeline
 
@@ -41,7 +44,12 @@ Opening a job auto-marks it viewed.
 
 <img src="assets/dashboard-tracker-move.gif" width="100%" alt="A cursor clicks Applied and the card moves to the Applied column">
 
-<img src="assets/dashboard-tracker.png" width="100%" alt="Tracker kanban board — Saved, Applied, Rejected columns">
+### Two scan depths
+
+Every scan honours a window. **Scan now** pulls only the recent window (`recent_days`) — cheap, fresh-only,
+for the regular schedule. **Deep scan** pulls the full window — for the first load or a weekly top-up.
+
+<img src="assets/dashboard-scan.png" width="440" alt="Scan menu: Scan now (recent window) vs Deep scan (full window)">
 
 ### Config over the wire
 
@@ -54,7 +62,7 @@ applied on the next scan, no redeploy.
 
 The whole dashboard is responsive, with a bottom nav bar.
 
-<img src="assets/dashboard-phone.png" width="300" alt="Phone view of the inbox">
+<p align="center"><img src="assets/dashboard-phone.png" width="300" alt="Phone view of the inbox"></p>
 
 ## Features
 
@@ -104,11 +112,10 @@ The whole dashboard is responsive, with a bottom nav bar.
   `/analyze` (run triage), `/funnel`, `/scan`, with inline buttons.
 
 **Sync & ops**
-- **HTTP API** — bearer-token, over a Cloudflare Tunnel. The dashboard and Telegram bot are its clients
-  (`/api/jobs`, `/api/funnel`, `/api/scan`, `/api/analyze`, `/api/config`); the server's DuckDB is the
-  single source of truth.
+- **HTTP API** — bearer-token. The dashboard and Telegram bot are its clients (`/api/jobs`, `/api/funnel`,
+  `/api/scan`, `/api/analyze`, `/api/config`); the server's DuckDB is the single source of truth.
 - **Config over the wire** — `GET/POST /api/config`, stored on the data volume, never in git.
-- **Deployed via Portainer GitOps** from this public repo; secrets are stack env vars.
+- **One Docker service** — deploy on any container host; secrets come from the environment.
 
 ## Deployment shape
 
@@ -122,13 +129,13 @@ flowchart LR
     TRIAGE["LLM triage (opt-in)<br/>claude-cli · Pro sub"] -.->|score + reason| DB
     DB --> EP["/api/jobs · /api/funnel<br/>/api/config · /api/analyze"]
   end
-  DASH["📱 Dashboard / Telegram"] <==>|"HTTPS · Cloudflare Tunnel · bearer token"| EP
+  DASH["📱 Dashboard / Telegram"] <==>|"HTTPS · bearer token"| EP
 ```
 
 One process owns the database — it serves the API/dashboard **and** runs both the scheduled and
 on-demand scans, so there's a single DB writer and no lock fights. Discovery needs no login and no human,
-so it runs unattended on the server. Deployed via **Portainer GitOps** from this public repo; secrets are
-Portainer stack env vars and `config.yml` is edited through `/api/config` — neither lives in git.
+so it runs unattended. Secrets come from the environment and `config.yml` is edited through `/api/config`
+— neither lives in git.
 
 ## Quick start (local)
 
@@ -148,10 +155,11 @@ uv run job-serve                      # serve API + dashboard, schedule + on-dem
 docker compose up -d --build          # single service; reads secrets from the environment
 ```
 
-On the server this is a **Portainer GitOps** stack pointed at this repo: secrets are Portainer stack
-env vars (`ADZUNA_*`, `REED_API_KEY`, `JOB_RADAR_API_TOKEN`, `SCAN_HOURS`, `TZ`, optional
-`TELEGRAM_*`) and `config.yml` / `rubric.md` are edited through the API (stored on the data volume,
-never in git). Point your own cloudflared tunnel at the published port.
+Runs anywhere Docker does — a VPS, a container host, a home server. Provide secrets as env vars
+(`ADZUNA_*`, `REED_API_KEY`, `JOB_RADAR_API_TOKEN`, `SCAN_HOURS`, `TZ`, optional `TELEGRAM_*`);
+`config.yml` / `rubric.md` are edited through the API and stored on the data volume, never in git.
+To reach the dashboard from your phone, put the published port behind any reverse proxy or tunnel you
+like. *(I run it as a Portainer GitOps stack behind a Cloudflare Tunnel — one example, not a requirement.)*
 
 **Triage auth (optional):** the image also bundles Node + the Claude Code CLI. To run on-server triage
 on your Pro subscription, mint a token once with `claude setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN`
@@ -167,9 +175,9 @@ both unset to run discovery-only.
 | Indeed | Indeed's mobile API — also covers Glassdoor (shared index); no login/key |
 | LinkedIn | Public **guest** jobs endpoint (no login/cookie/key), only per-IP rate limiting; opt-in |
 | Greenhouse / Lever / Ashby | UK + global companies (board slugs; vanity-domain boards work too) |
-| Workable | Companies on Workable (e.g. Starling, Hugging Face) |
-| Workday | Self-hosted enterprise sites (`{host, site}` per tenant — e.g. Live Nation, CrowdStrike) |
-| Oracle ORC | Self-hosted CandidateExperience sites (e.g. JPMorgan, Goldman Sachs, Bank of England) |
+| Workable | Companies hosting their board on Workable |
+| Workday | Enterprises self-hosting Workday (`{host, site}` per tenant) |
+| Oracle ORC | Enterprises on Oracle Cloud Recruiting (self-hosted CandidateExperience sites) |
 
 Adding a source is one file + one registry line. The connectors target sources with a clean HTTP/JSON
 surface; anything without one (bespoke portals, one-off boards) is out of scope by design.

@@ -968,7 +968,7 @@ const CONNECTORS = [
   {id:"indeed", name:"Indeed", desc:"Mobile API · covers Glassdoor", icon:"compass", locs:true,
    lists:[{key:"queries", label:"Search queries", ph:"add query…"}],
    scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"],["results_per_page","Results / page"]]},
-  {id:"linkedin", name:"LinkedIn", desc:"Guest endpoint · deep-scan only", icon:"compass", locs:true,
+  {id:"linkedin", name:"LinkedIn", desc:"Guest endpoint · no login or key", icon:"compass", locs:true,
    lists:[{key:"queries", label:"Search queries (OR-joined per location)", ph:"add query…"},
           {key:"proxies", label:"Proxies (host:port or user:pass@host:port; blank = direct)", ph:"add proxy…"}],
    scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"],["request_delay","Request delay (s)"]]},
