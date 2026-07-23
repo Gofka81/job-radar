@@ -1,22 +1,25 @@
 # job-radar
 
-Deterministic job-discovery pipeline — scans job sources on a schedule, filters and dedups without
-touching an LLM, and serves the shortlist to a phone-friendly dashboard. Fully config-driven: point it at
-any roles, tech stack, and locations you like.
+A deterministic job-discovery pipeline. It scans job boards on a schedule, filters and de-duplicates the
+results with plain HTTP and SQL — **no LLM anywhere in the discovery path** — and serves a ranked shortlist
+to a phone-friendly dashboard. Config-driven end to end: point it at any roles, tech stack, and locations.
+
+Built as a data-engineering portfolio project. The interesting part isn't scraping jobs — it's the
+discipline of keeping discovery cheap and reproducible, and spending LLM budget only where it earns its keep.
 
 ## The idea
 
-A job search split into two tiers by what each one *should* cost:
+Job hunting has a cost gradient that most tools ignore. `job-radar` splits the work into two tiers by what
+each one *should* cost:
 
-- **Discovery** (find jobs, filter, dedup) — pure HTTP + SQL. **Zero LLM tokens.** The core of this repo.
-- **Triage** (a quick 0–10 fit score per role) — a cheap, bounded, *optional* on-server LLM pass so you
-  can rank the shortlist from your phone. Runs on your Claude **Pro subscription** via Claude Code
-  headless (no per-token cost), or the metered API. Clearly separated from discovery.
+- **Discovery** — find, filter, de-duplicate. Pure HTTP + SQL, **zero LLM tokens.** Runs unattended on a
+  schedule; this is the core of the repo.
+- **Triage** — an optional, bounded LLM pass that scores each surviving role 0–10 for fit, so you can rank
+  the shortlist from your phone. Runs on a Claude **Pro subscription** via Claude Code headless (no
+  per-token cost) or the metered API — and only ever on jobs that already cleared the deterministic filter.
 
-`job-radar` scans your configured sources on a schedule, filters + dedups, and **triages the survivors** for fit —
-
-**LLM cost only on jobs that survive filtering, never the raw firehose.** The locked principle holds:
-**discovery is deterministic; triage is bounded and opt-in.**
+So you pay LLM cost on a handful of pre-filtered roles, never the raw firehose. The rule that holds
+everywhere: **discovery is deterministic; triage is bounded and opt-in.**
 
 ## Features
 

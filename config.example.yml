@@ -1,58 +1,59 @@
-# Copy to config.yml and edit. config.yml is gitignored.
+# Copy to config.yml and edit for your own search. config.yml is gitignored.
+# The values below are a neutral example (US software-engineering roles) — replace
+# titles, locations, and sources with whatever you're actually hunting for.
 
 # --- Title filter ---
 # A title passes if >=1 positive matches AND 0 negatives match (case-insensitive substring).
 title_filter:
   positive:
-    - "Data Engineer"
-    - "Analytics Engineer"
-    - "Data Platform"
-    - "PySpark"
-    - "Spark"
-    - "Databricks"
-    - "Snowflake"
-    - "Delta Lake"
-    - "Airflow"
-    - "ETL"
-    - "ELT"
-    - "Data Pipeline"
-    - "Lakehouse"
+    - "Software Engineer"
+    - "Backend Engineer"
+    - "Frontend Engineer"
+    - "Full Stack Engineer"
+    - "Platform Engineer"
+    - "Go"
+    - "Kubernetes"
+    - "React"
+    - "Node.js"
+    - "Python"
+    - "Microservices"
   negative:
     # Trim seniority you don't want + stacks you don't work in
     - "Junior"
     - "Intern"
     - "Graduate"
     - "Principal"
-    - "Head of"
+    - "Staff"           # remove if you want staff/lead roles
     - "Director"
-    - "Manager"          # remove if you want lead/management roles
-    - ".NET"
+    - "Manager"
     - "PHP"
+    - "WordPress"
     - "Salesforce"
 
 # --- Location filter ---
 # block wins over allow. Empty job location passes (don't penalise missing data).
 location_filter:
   allow:
-    - "Edinburgh"
-    - "Glasgow"
-    - "Scotland"
+    - "New York"
+    - "San Francisco"
+    - "California"
+    - "Seattle"
+    - "Austin"
     - "Remote"
-    - "United Kingdom"
-    - "UK"
+    - "United States"
+    - "US"
   block: []
-  # Note: a "London (Remote)" role passes via "Remote"; pure on-site London with no
-  # remote tag won't match allow unless "London" is added. Tune to taste.
+  # Note: a "San Francisco (Remote)" role passes via "Remote"; a pure on-site role in
+  # a city not listed here won't match allow unless you add that city. Tune to taste.
 
 # --- Priority cities ---
 # Used two ways: when a raw location matches several cities the first priority hit
 # wins, and a multi-city posting shows its first priority city in the dashboard
-# preview (so a priority city is never hidden behind "+N"). Omit to use the default
-# (Edinburgh, Glasgow, London).
+# preview (so a priority city is never hidden behind "+N").
 priority_locations:
-  - "Edinburgh"
-  - "Glasgow"
-  - "London"
+  - "New York"
+  - "San Francisco"
+  - "Seattle"
 
 # --- Lifecycle ---
 # A 'new' job not seen in a source's listing for this many hours is marked
@@ -64,8 +65,8 @@ priority_locations:
 expire_after_hours: 24
 
 # --- Deep vs regular scans ---
-# A REGULAR scan (scheduled hourly + the "Scan now" button) only looks `recent_days`
-# back — cheaper, fresh-only, fewer API calls. A DEEP scan (the 🔭 button /
+# A REGULAR scan (scheduled + the "Scan now" button) only looks `recent_days` back —
+# cheaper, fresh-only, fewer API calls. A DEEP scan (the 🔭 button /
 # POST /api/scan?deep=1 / `job-scan --deep`) ignores this and pulls the full window
 # (e.g. Adzuna max_days_old=7) to load/refresh the whole week.
 #
@@ -85,21 +86,21 @@ fetch_full_jd: true
 sources:
   adzuna:
     enabled: true
-    country: gb
-    queries: ["data engineer", "analytics engineer", "databricks"]
-    # Per-location targeting: each entry is its own date-sorted pull, so London's
-    # volume can't crowd out Edinburgh/Glasgow. where: "" = nationwide/remote pass.
+    country: us                # Adzuna runs in many countries — set your ISO code (us, gb, de…)
+    queries: ["software engineer", "backend engineer", "kubernetes"]
+    # Per-location targeting: each entry is its own date-sorted pull, so one busy metro
+    # can't crowd out the others. where: "" = nationwide/remote pass.
     # API BUDGET: calls/scan = queries × locations × max_pages. Adzuna free tier is
     # ~250/day; with ~7 scans/day keep queries×locations×max_pages ≲ 35 (here 3×4×2=24).
     locations:
-      - { where: "Edinburgh", distance: 40 }   # km
-      - { where: "Glasgow",   distance: 40 }
-      - { where: "London",    distance: 30 }
-      - { where: "" }                          # nationwide + remote catch-all
+      - { where: "New York",      distance: 40 }   # miles/km per Adzuna's country unit
+      - { where: "San Francisco", distance: 40 }
+      - { where: "Seattle",       distance: 30 }
+      - { where: "" }                              # nationwide + remote catch-all
     category: it-jobs          # server-side narrowing; "" to disable
     # Server-side exclude to stop obvious non-matches eating the page budget.
     # CAUTION: this matches the FULL ad text, not just the title — so keep it to
-    # words that never appear in a mid-level DE description. Do NOT add
+    # words that never appear in a mid-level engineering description. Do NOT add
     # senior/lead/manager here (they show up in plenty of mid-level JDs and you'd
     # lose real roles); the title_filter.negative list trims those precisely.
     what_exclude: "graduate intern apprentice apprenticeship internship placement"
@@ -109,25 +110,23 @@ sources:
     results_per_page: 50
 
   reed:
-    enabled: true
-    queries: ["data engineer", "analytics engineer"]
-    locations:                 # mirror of adzuna; distance in MILES for Reed
-      - { where: "Edinburgh", distance: 40 }
-      - { where: "Glasgow",   distance: 40 }
-      - { where: "London",    distance: 30 }
-      - { where: "" }                          # nationwide
+    enabled: false             # Reed is a UK-only board — enable if you target the UK
+    queries: ["software engineer", "backend engineer"]
+    locations:                 # distance in MILES for Reed
+      - { where: "London",   distance: 30 }
+      - { where: "" }                              # nationwide
     results_to_take: 100
 
   indeed:
-    enabled: false             # Indeed mobile GraphQL API (no key). Covers Indeed +
+    enabled: true              # Indeed mobile GraphQL API (no key). Covers Indeed +
                                # Glassdoor (shared index). Distance in MILES; where=""
                                # is a nationwide/remote pass. Full JD comes with search.
-    queries: ["data engineer", "analytics engineer"]
+    queries: ["software engineer", "backend engineer"]
     locations:
-      - { where: "Edinburgh", distance: 40 }
-      - { where: "Glasgow",   distance: 40 }
-      - { where: "London",    distance: 30 }
-      - { where: "" }                          # nationwide + remote catch-all
+      - { where: "New York",      distance: 40 }
+      - { where: "San Francisco", distance: 40 }
+      - { where: "Seattle",       distance: 30 }
+      - { where: "" }                              # nationwide + remote catch-all
     hours_old: 168
     max_pages: 2
     results_per_page: 50
@@ -138,70 +137,64 @@ sources:
                                # Run on the DEEP-scan cadence, not every 2h.
     # queries are OR-joined into ONE boolean search per location (3 terms = 1 request);
     # title_filter still trims post-fetch. Same array shape as the other sources.
-    queries: ["data engineer", "data platform", "analytics engineer"]
+    queries: ["software engineer", "platform engineer", "backend engineer"]
     locations:                 # per-location passes; distance in MILES. where=""/geoId
-      - { where: "Edinburgh", distance: 40 }
-      - { where: "Glasgow",   distance: 40 }
-      - { where: "London",    distance: 25 }
-      - { where: "United Kingdom" }            # nationwide + remote catch-all
+      - { where: "New York",      distance: 40 }
+      - { where: "San Francisco", distance: 40 }
+      - { where: "United States" }                 # nationwide + remote catch-all
     hours_old: 168             # f_TPR window (last N hours posted); the main page-cut.
                                # Regular scans tighten this via recent_days×24 if set.
     max_pages: 2               # start-paginated @ up to 25/page; early-stops on empty
     request_delay: 1.5         # seconds between pages (politeness; + jitter)
-    # Rotating proxies (Webshare free tier = 10 datacenter IPs). Bare host:port or a
+    # Rotating proxies (e.g. Webshare free tier = 10 datacenter IPs). Bare host:port or a
     # full user:pass@host:port; a 429/dead IP rotates to the next. Empty = direct
     # (fine for the tiny per-scan budget). Secrets live here (config.yml is gitignored).
     proxies: []
     #  - "user:pass@1.2.3.4:6754"
-    #  - "user:pass@p.webshare.io:80"          # or one rotating endpoint
+    #  - "user:pass@p.webshare.io:80"              # or one rotating endpoint
 
   # ATS boards take a list of company slugs (the bit after the ATS domain).
-  # CURATE THESE — verify each slug resolves (200, not 404). Examples below are
-  # illustrative; replace with UK data-heavy employers you care about.
+  # CURATE THESE — verify each slug resolves (200, not 404). Add the employers you
+  # care about; leaving the list empty simply skips the connector.
   greenhouse:
     enabled: false
-    companies: []             # e.g. "monzo", "wise", "deliveroo"  ← verify slugs
+    companies: []             # e.g. "stripe", "figma"  ← verify slugs
 
   lever:
     enabled: false
-    companies: []             # e.g. "spotify"  ← verify slugs
+    companies: []             # e.g. "netflix"  ← verify slugs
 
   ashby:
     enabled: false
     companies: []             # ← verify slugs
 
-  # Workday is self-hosted per employer (UK banks/enterprise: NatWest, Lloyds…).
-  # Find host+site from the careers URL: https://{host}/{lang}/{site} — e.g.
-  # https://natwest.wd3.myworkdayjobs.com/en-US/NatWestGroup → host=natwest.wd3.
-  # myworkdayjobs.com, site=NatWestGroup. `queries` narrows server-side so we only
-  # pull JD detail for relevant roles; keep them tight to save requests.
+  # Workday is self-hosted per employer. Find host+site from the careers URL:
+  # https://{host}/{lang}/{site} — e.g. https://acme.wd1.myworkdayjobs.com/en-US/Careers
+  # → host=acme.wd1.myworkdayjobs.com, site=Careers. `queries` narrows server-side so we
+  # only pull JD detail for relevant roles; keep them tight to save requests.
   workday:
     enabled: false
-    queries: ["data engineer", "data platform", "analytics engineer"]
+    queries: ["software engineer", "backend engineer"]
     max_pages: 2
     companies:
-      # Verified working (returns the CXS JSON). Add your targets the same way —
-      # host+site come from the careers URL https://{host}/{lang}/{site}.
-      # - { host: "livenation.wd503.myworkdayjobs.com", site: "TMExternalSite", name: "Live Nation" } WORKING EXAMPLE
+      # Add your targets — host+site come from the careers URL https://{host}/{lang}/{site}.
+      # - { host: "acme.wd1.myworkdayjobs.com", site: "Careers", name: "Acme" }
 
-  # Oracle Cloud Recruiting (ORC) — self-hosted per tenant (banks: JPMorgan…).
-  # site = the `siteNumber` from the careers URL
-  # https://{host}/hcmUI/CandidateExperience/en/sites/{site}. `keyword` (queries)
-  # searches the full JD server-side.
+  # Oracle Cloud Recruiting (ORC) — self-hosted per tenant. site = the `siteNumber`
+  # from the careers URL https://{host}/hcmUI/CandidateExperience/en/sites/{site}.
+  # `keyword` (queries) searches the full JD server-side.
   oracle:
     enabled: false
-    queries: ["data engineer", "data platform", "analytics engineer"]
+    queries: ["software engineer", "backend engineer"]
     max_pages: 2
     companies:
-      # Verified working (returns the CE REST JSON).
-      # - { host: "<test-company>.fa.<region if needed>.oraclecloud.com", site: "Site suffix", name: "Alias for company name" }
-      # - { host: "jpmc.fa.oraclecloud.com", site: "CX_1001", name: "JPMorgan" } WORKING EXAMPLE
+      # - { host: "acme.fa.oraclecloud.com", site: "CX_1001", name: "Acme" }
 
 # --- On-server LLM triage (Stage 1) ---
 # Scores already-discovered jobs for fit from the stored JD (0-10). Discovery
 # stays deterministic — this is the only LLM step in this repo, and it only ranks
 # the pending list. Triggered from the dashboard/phone (POST /api/analyze); writes
-# score + reason, never touches the workflow `status`. Needs ANTHROPIC_API_KEY.
+# score + reason, never touches the workflow `status`.
 # The personal candidate profile lives in a SEPARATE file, analysis/rubric.md
 # (gitignored; baked fallback analysis/rubric.example.md), editable via
 # GET/POST /api/rubric — not here, to keep CV/comp out of this public example.
