@@ -52,7 +52,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   html, body { margin:0; }
   body { background:var(--bg); color:var(--fg);
          font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-         -webkit-font-smoothing:antialiased; }
+         -webkit-font-smoothing:antialiased; overflow-x:hidden; }
+  /* stop horizontal swipe (kanban) rubber-banding the viewport, which drags the fixed
+     bottom nav around on iOS. Contain the sideways scroll to the board itself. */
+  html, body { overscroll-behavior-x:none; }
   button, select, input, textarea { font-family:inherit; }
 
   /* ---- app bar ---- */
@@ -215,7 +218,7 @@ DASHBOARD_HTML = r"""<!doctype html>
      (full-bleed via the centered-100vw trick). Columns then GROW to fill evenly. */
   #trackerView { width:96vw; max-width:1500px; margin-left:50%; transform:translateX(-50%); }
   .kanban { display:flex; gap:14px; overflow-x:auto; padding-bottom:10px; align-items:flex-start;
-            scroll-snap-type:x proximity; -webkit-overflow-scrolling:touch; }
+            scroll-snap-type:x proximity; -webkit-overflow-scrolling:touch; overscroll-behavior-x:contain; }
   .kanban::-webkit-scrollbar { height:8px; }
   .kcol { flex:1 1 300px; min-width:300px; scroll-snap-align:start; background:var(--bg);
           border:1px solid var(--line); border-radius:14px; padding:12px;
@@ -254,7 +257,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   /* ---- settings gear + iOS-style sub-pages ---- */
   .iconbtn.on { color:var(--accent); border-color:var(--accent); }
   .set-menu { max-width:560px; }
-  .set-menu > .st-h { display:block; font-size:18px; font-weight:750; margin-bottom:12px; }
+  .set-menu > .st-h { display:block; font-size:18px; font-weight:750; margin-bottom:12px; text-align:center; }
   .set-menu-card { background:var(--card); border:1px solid var(--line); border-radius:12px;
                    box-shadow:var(--shadow); overflow:hidden; }
   .set-row { display:flex; align-items:center; gap:12px; width:100%; padding:13px 14px; border:0;
@@ -269,9 +272,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   .set-row .txt span { display:block; font-size:12px; color:var(--muted); }
   .set-row .chev { color:var(--muted); flex:0 0 auto; line-height:1; }
   .set-row .chev svg { width:18px; height:18px; }
-  .set-head { display:flex; align-items:center; gap:6px; margin-bottom:14px; }
-  .set-head .st-title { font-size:18px; font-weight:750; }
-  .set-back { display:inline-flex; align-items:center; gap:3px; background:none; border:0; cursor:pointer;
+  .set-head { display:flex; align-items:center; justify-content:center; position:relative;
+              min-height:38px; margin-bottom:14px; }
+  .set-head .st-title { font-size:18px; font-weight:750; text-align:center; }
+  .set-back { position:absolute; left:0; top:50%; transform:translateY(-50%);
+              display:inline-flex; align-items:center; gap:3px; background:none; border:0; cursor:pointer;
               color:var(--accent); font-size:14px; font-weight:600; padding:6px 10px 6px 4px; border-radius:8px; }
   .set-back:hover { background:var(--pill); }
   .set-block { background:var(--card); border:1px solid var(--line); border-radius:11px; padding:16px;
@@ -284,7 +289,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .seg button.on { background:var(--accent); color:var(--accent-fg); }
 
   /* ---- config form (per-connector cards) ---- */
-  .cfg-mode { display:flex; justify-content:flex-end; margin-bottom:12px; }
+  .cfg-mode { display:flex; justify-content:center; margin-bottom:12px; }
   .cfg-label { font-size:10.5px; font-weight:700; letter-spacing:.07em; text-transform:uppercase;
                color:var(--muted); margin:16px 2px 8px; }
   .csrc { background:var(--card); border:1px solid var(--line); border-radius:11px; margin-bottom:8px;
@@ -330,6 +335,21 @@ DASHBOARD_HTML = r"""<!doctype html>
   .taginput input { flex:1; min-width:80px; border:0; background:none; font-size:12.5px; padding:3px;
                     min-height:26px; box-shadow:none; }
   .taginput input:focus { outline:none; }
+  .field select { background:var(--bg); border:1px solid var(--line); border-radius:8px;
+                  padding:8px 10px; font-size:13px; min-height:36px; }
+  .field.full { grid-column:1 / -1; }
+  .locrow { display:flex; gap:7px; align-items:center; margin-bottom:6px; }
+  .locrow .loc-where { flex:1; }
+  .locrow .loc-dist { width:76px; }
+  .locrow .loc-del { background:none; border:1px solid transparent; border-radius:7px; cursor:pointer;
+                     width:32px; height:32px; flex:0 0 auto; color:var(--muted);
+                     display:inline-flex; align-items:center; justify-content:center; }
+  .locrow .loc-del:hover { border-color:var(--danger); color:var(--danger); }
+  .locrow .loc-del svg { width:14px; height:14px; }
+  .loc-add { background:none; border:1px dashed var(--line); color:var(--muted); border-radius:8px;
+             padding:7px 11px; font-size:12.5px; font-weight:650; cursor:pointer; align-self:flex-start; }
+  .loc-add:hover { border-color:var(--accent); color:var(--accent); }
+  .cfg-check { display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600; cursor:pointer; }
   .cfg-note { color:var(--muted); font-size:12px; }
   .savebar { position:sticky; bottom:0; z-index:10; display:flex; gap:10px; align-items:center;
              margin-top:14px; padding:12px 0 8px; flex-wrap:wrap;
@@ -365,6 +385,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     .wrap { padding:12px 12px 84px; }               /* room for the fixed bottom nav */
     .actions .btn span.lbl { display:none; }   /* icon-only actions on phones */
     .tabs { display:none; }                    /* primary nav moves to the bottom bar */
+    #gearBtn { display:none; }                 /* Settings lives in the bottom nav on phones */
     /* kanban: one column at a time with a peek of the next; swipe between them */
     .kcol { flex-basis:84vw; min-width:84vw; }
     .pager .btn { flex:1; }
@@ -888,27 +909,30 @@ function refreshView(){
 //     specific keys into that text so comments/structure survive. ---
 const CONNECTORS = [
   {id:"adzuna", name:"Adzuna", desc:"UK aggregator · API key", icon:"scan", locs:true,
-   list:{key:"queries", label:"Search queries", ph:"add query…"},
-   scalars:[["max_pages","Max pages / location"],["max_days_old","Max days old"],
-            ["category","Category"],["results_per_page","Results / page"],["what_exclude","Exclude terms"]]},
+   lists:[{key:"queries", label:"Search queries", ph:"add query…"}],
+   scalars:[["country","Country"],["max_pages","Max pages / location"],["max_days_old","Max days old"],
+            ["sort_by","Sort by"],["category","Category"],["results_per_page","Results / page"],
+            ["what_exclude","Exclude terms",true]]},
   {id:"reed", name:"Reed", desc:"UK aggregator · API key", icon:"scan", locs:true,
-   list:{key:"queries", label:"Search queries", ph:"add query…"}, scalars:[]},
+   lists:[{key:"queries", label:"Search queries", ph:"add query…"}],
+   scalars:[["results_to_take","Results to take"]]},
   {id:"indeed", name:"Indeed", desc:"Mobile API · covers Glassdoor", icon:"compass", locs:true,
-   list:{key:"queries", label:"Search queries", ph:"add query…"},
-   scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"]]},
+   lists:[{key:"queries", label:"Search queries", ph:"add query…"}],
+   scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"],["results_per_page","Results / page"]]},
   {id:"linkedin", name:"LinkedIn", desc:"Guest endpoint · deep-scan only", icon:"compass", locs:true,
-   list:{key:"queries", label:"Search queries (OR-joined per location)", ph:"add query…"},
-   scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"]]},
+   lists:[{key:"queries", label:"Search queries (OR-joined per location)", ph:"add query…"},
+          {key:"proxies", label:"Proxies (host:port or user:pass@host:port; blank = direct)", ph:"add proxy…"}],
+   scalars:[["max_pages","Max pages / location"],["hours_old","Hours old"],["request_delay","Request delay (s)"]]},
   {id:"greenhouse", name:"Greenhouse", desc:"ATS boards · company slugs", icon:"wrench",
-   list:{key:"companies", label:"Company board slugs", ph:"e.g. monzo, wise…"}, scalars:[]},
+   lists:[{key:"companies", label:"Company board slugs", ph:"e.g. monzo, wise…"}], scalars:[]},
   {id:"lever", name:"Lever", desc:"ATS boards · company slugs", icon:"wrench",
-   list:{key:"companies", label:"Company board slugs", ph:"e.g. spotify…"}, scalars:[]},
+   lists:[{key:"companies", label:"Company board slugs", ph:"e.g. spotify…"}], scalars:[]},
   {id:"ashby", name:"Ashby", desc:"ATS boards · company slugs", icon:"wrench",
-   list:{key:"companies", label:"Company board slugs", ph:"add slug…"}, scalars:[]},
-  {id:"workday", name:"Workday", desc:"Self-hosted · host + site", icon:"wrench",
-   list:{key:"queries", label:"Queries (narrow server-side)", ph:"add query…"}, scalars:[["max_pages","Max pages"]]},
-  {id:"oracle", name:"Oracle ORC", desc:"Oracle Cloud Recruiting · per tenant", icon:"wrench",
-   list:{key:"queries", label:"Queries (searches full JD)", ph:"add query…"}, scalars:[["max_pages","Max pages"]]},
+   lists:[{key:"companies", label:"Company board slugs", ph:"add slug…"}], scalars:[]},
+  {id:"workday", name:"Workday", desc:"Self-hosted · host + site", icon:"wrench", companiesRaw:true,
+   lists:[{key:"queries", label:"Queries (narrow server-side)", ph:"add query…"}], scalars:[["max_pages","Max pages"]]},
+  {id:"oracle", name:"Oracle ORC", desc:"Oracle Cloud Recruiting · per tenant", icon:"wrench", companiesRaw:true,
+   lists:[{key:"queries", label:"Queries (searches full JD)", ph:"add query…"}], scalars:[["max_pages","Max pages"]]},
 ];
 let CFG_MODE = "form";
 const CFG_OPEN = new Set();     // expanded connector card ids
@@ -980,8 +1004,46 @@ function _ctx(lines, scope){
   const p = scope.split(":");
   if (p[0]==="src"){ const b = srcBounds(lines, p[1]); return b && {s:b.s, e:b.e, ind:4, key:p[2]}; }
   if (p[0]==="gf"){ const b = topBlock(lines, "title_filter"); return b && {s:b.s, e:b.e, ind:2, key:p[1]}; }
-  if (p[0]==="top") return {s:0, e:lines.length, ind:0, key:p[1]};
+  if (p[0]==="lf"){ const b = topBlock(lines, "location_filter"); return b && {s:b.s, e:b.e, ind:2, key:p[1]}; }
+  if (p[0]==="an"){ const b = topBlock(lines, "analysis"); return b && {s:b.s, e:b.e, ind:2, key:p[1]}; }
+  if (p[0]==="tl") return {s:0, e:lines.length, ind:0, key:p[1]};   // top-level list (items at indent 2)
+  if (p[0]==="top") return {s:0, e:lines.length, ind:0, key:p[1]};  // top-level scalar
   return null;
+}
+// locations = a block of flow maps (`- { where: "X", distance: 40 }`) under a source.
+function readLocations(lines, id){
+  const b = srcBounds(lines, id); if (!b) return [];
+  const i = _keyIdx(lines, b.s, b.e, 4, "locations"); if (i<0) return [];
+  const out = [], ire = /^ {6}- \{(.*)\}/;
+  for (let j=i+1; j<b.e; j++){ const m = lines[j].match(ire);
+    if (m){ const w = (m[1].match(/where:\s*"?([^",}]*)"?/)||[])[1] || "";
+            const d = (m[1].match(/distance:\s*(\d+)/)||[])[1] || "";
+            out.push({where:w.trim(), distance:d}); }
+    else if (/^\s*#/.test(lines[j]) || !lines[j].trim()) continue;
+    else break; }
+  return out;
+}
+function patchLocations(lines, id, rows){
+  const b = srcBounds(lines, id); if (!b) return;
+  const i = _keyIdx(lines, b.s, b.e, 4, "locations");
+  const block = rows.length
+    ? ["    locations:"].concat(rows.map(r => {
+        const parts = ['where: "'+(r.where||"").replace(/"/g,"")+'"'];
+        if (String(r.distance||"").trim()!=="") parts.push("distance: "+r.distance);
+        return "      - { "+parts.join(", ")+" }"; }))
+    : ["    locations: []"];
+  if (i<0){ lines.splice(b.s+1, 0, ...block); return; }
+  let last = i, ire = /^ {6}- /;
+  for (let j=i+1; j<lines.length; j++){
+    if (ire.test(lines[j])) last = j;
+    else if (/^\s*#/.test(lines[j]) || !lines[j].trim()) continue;
+    else break; }
+  lines.splice(i, last-i+1, ...block);
+}
+function cfgApplyLoc(id, mutate, noRender){
+  const lines = _lines();
+  patchLocations(lines, id, mutate(readLocations(lines, id).map(r => ({...r}))));
+  _commit(lines); if (!noRender) renderCfgForm();
 }
 function cfgApplyList(scope, mutate){
   const lines = _lines(), c = _ctx(lines, scope); if (!c) return;
@@ -1003,20 +1065,31 @@ function chipsHTML(scope, items, danger){
     + items.map((t,i) => `<span class="tag${danger?" neg":""}">${esc(t)}<b data-rm="${scope}" data-i="${i}">✕</b></span>`).join("")
     + `<input placeholder="add…" data-addinput="${scope}"></div>`;
 }
+function locRowsHTML(id, rows){
+  return `<div class="field"><label>Locations <span class="help">— each is its own budgeted pull; blank <i>where</i> = nationwide/remote</span></label>`
+    + rows.map((r,i) => `<div class="locrow">`
+        + `<input class="loc-where" data-loc-where="${id}" data-loc-i="${i}" value="${esc(r.where)}" placeholder="(nationwide + remote)">`
+        + `<input class="loc-dist" data-loc-dist="${id}" data-loc-i="${i}" value="${esc(r.distance)}" inputmode="numeric" placeholder="dist">`
+        + `<button class="loc-del" data-loc-del="${id}" data-loc-i="${i}" title="Remove">${ICON.x}</button></div>`).join("")
+    + `<button class="loc-add" data-loc-add="${id}">+ Add location</button></div>`;
+}
 function connCardHTML(m, lines){
   const b = srcBounds(lines, m.id), present = !!b;
   const en = present && (readScalar(lines, b.s, b.e, 4, "enabled")||"").toLowerCase()==="true";
   const open = CFG_OPEN.has(m.id);
-  const items = present ? (readList(lines, b.s, b.e, 4, m.list.key) || []) : [];
   let body = "";
   if (!present) {
     body = `<div class="cfg-note">Not in config.yml yet — add a <code>${m.id}:</code> block in Raw YAML first.</div>`;
   } else {
-    body += `<div class="field"><label>${m.list.label}</label>${chipsHTML("src:"+m.id+":"+m.list.key, items, false)}</div>`;
-    if (m.locs) body += `<div class="cfg-note">Locations are edited in <b>Raw YAML</b> (each is its own budgeted pull).</div>`;
-    if (m.scalars.length) body += `<div class="fgrid">` + m.scalars.map(([k,lbl]) => {
+    body += m.lists.map(L => {
+      const items = readList(lines, b.s, b.e, 4, L.key) || [];
+      return `<div class="field"><label>${L.label}</label>${chipsHTML("src:"+m.id+":"+L.key, items, false)}</div>`;
+    }).join("");
+    if (m.locs) body += locRowsHTML(m.id, readLocations(lines, m.id));
+    if (m.companiesRaw) body += `<div class="cfg-note">Companies (<code>host | site | name</code>) are edited in <b>Raw YAML</b>.</div>`;
+    if (m.scalars.length) body += `<div class="fgrid">` + m.scalars.map(([k,lbl,full]) => {
       const v = readScalar(lines, b.s, b.e, 4, k);
-      return `<div class="field"><label>${lbl}</label><input data-scalar="src:${m.id}:${k}" value="${esc(v==null?"":v)}"></div>`;
+      return `<div class="field${full?" full":""}"><label>${lbl}</label><input data-scalar="src:${m.id}:${k}" value="${esc(v==null?"":v)}"></div>`;
     }).join("") + `</div>`;
   }
   return `<div class="csrc${en?" en":""}${open?" open":""}" data-card="${m.id}">
@@ -1030,27 +1103,62 @@ function connCardHTML(m, lines){
     <div class="csrc-body">${body}</div>
   </div>`;
 }
+function analysisCardHTML(lines){
+  const open = CFG_OPEN.has("_an"), bd = topBlock(lines, "analysis");
+  const rd = k => bd ? readScalar(lines, bd.s, bd.e, 2, k) : null;
+  const engine = rd("engine") || "claude-cli", model = rd("model") || "", maxj = rd("max_jobs") || "";
+  const opt = (v,l) => `<option value="${v}"${engine===v?" selected":""}>${l}</option>`;
+  return `<div class="csrc${open?" open":""}" data-card="_an">
+    <div class="csrc-head" data-head="_an">
+      <span class="caret" data-icon="chevron"></span>
+      <span class="csrc-ico" data-icon="sparkles"></span>
+      <div style="min-width:0"><div class="csrc-name">LLM triage</div>
+        <div class="csrc-sub">Fit-scoring engine, model &amp; limits</div></div>
+    </div>
+    <div class="csrc-body">
+      <div class="fgrid">
+        <div class="field"><label>Engine</label><select data-scalar="an:engine">
+          ${opt("claude-cli","claude-cli (Pro sub · no $)")}${opt("api","api (metered)")}</select></div>
+        <div class="field"><label>Max jobs / run</label><input data-scalar="an:max_jobs" value="${esc(maxj)}" inputmode="numeric"></div>
+        <div class="field full"><label>Model</label>
+          <input data-scalar="an:model" value="${esc(model)}" placeholder="claude-haiku-4-5" list="cfgModels"></div>
+      </div>
+      <div class="cfg-note">claude-cli spends your Claude Pro quota (calls, not $) — keep <b>Max jobs</b> modest.
+        The candidate profile lives in <b>Settings → Rubric</b>.</div>
+    </div>
+  </div>`;
+}
 function globalCardHTML(lines){
   const open = CFG_OPEN.has("_gf");
-  const pos = readList(lines, ...Object.values(topBlock(lines,"title_filter")||{s:0,e:0}), 2, "positive") || [];
-  const neg = readList(lines, ...Object.values(topBlock(lines,"title_filter")||{s:0,e:0}), 2, "negative") || [];
+  const tf = Object.values(topBlock(lines,"title_filter") || {s:0,e:0});
+  const lf = Object.values(topBlock(lines,"location_filter") || {s:0,e:0});
+  const pos = readList(lines, ...tf, 2, "positive") || [];
+  const neg = readList(lines, ...tf, 2, "negative") || [];
+  const allow = readList(lines, ...lf, 2, "allow") || [];
+  const block = readList(lines, ...lf, 2, "block") || [];
+  const prio = readList(lines, 0, lines.length, 0, "priority_locations") || [];
   const exp = readScalar(lines, 0, lines.length, 0, "expire_after_hours");
   const rec = readScalar(lines, 0, lines.length, 0, "recent_days");
+  const full = (readScalar(lines, 0, lines.length, 0, "fetch_full_jd") || "true").toLowerCase()==="true";
   return `<div class="csrc${open?" open":""}" data-card="_gf">
     <div class="csrc-head" data-head="_gf">
       <span class="caret" data-icon="chevron"></span>
       <span class="csrc-ico" data-icon="sliders"></span>
-      <div style="min-width:0"><div class="csrc-name">Title &amp; location filters</div>
+      <div style="min-width:0"><div class="csrc-name">Filters &amp; lifecycle</div>
         <div class="csrc-sub">Applied to every source</div></div>
       <span class="csrc-badge" style="background:color-mix(in srgb,var(--new) 16%,transparent);color:var(--new)">Always on</span>
     </div>
     <div class="csrc-body">
       <div class="field"><label>Title must match one of</label>${chipsHTML("gf:positive", pos, false)}</div>
       <div class="field"><label>Title must NOT match</label>${chipsHTML("gf:negative", neg, true)}</div>
+      <div class="field"><label>Location allow <span class="help">— city / region / "Remote" / "UK"</span></label>${chipsHTML("lf:allow", allow, false)}</div>
+      <div class="field"><label>Location block <span class="help">— wins over allow</span></label>${chipsHTML("lf:block", block, true)}</div>
+      <div class="field"><label>Priority cities <span class="help">— shown first on multi-city posts</span></label>${chipsHTML("tl:priority_locations", prio, false)}</div>
       <div class="fgrid">
         <div class="field"><label>Expire after (hours)</label><input data-scalar="top:expire_after_hours" value="${esc(exp==null?"":exp)}"></div>
         <div class="field"><label>Recent window (days)</label><input data-scalar="top:recent_days" value="${esc(rec==null?"":rec)}" placeholder="unset = full window"></div>
       </div>
+      <label class="cfg-check"><span class="sw"><input type="checkbox" data-bool="top:fetch_full_jd"${full?" checked":""}><span class="tr"></span></span> Fetch full JD after scans (Reed)</label>
     </div>
   </div>`;
 }
@@ -1058,9 +1166,12 @@ function renderCfgForm(){
   if (!$("#cfg").value) { $("#cfgForm").innerHTML = ""; return; }
   const lines = _lines();
   $("#cfgForm").innerHTML =
-    `<div class="cfg-label">Connectors</div>`
+    `<datalist id="cfgModels"><option value="claude-haiku-4-5"><option value="claude-sonnet-5"><option value="claude-opus-4-8"></datalist>`
+    + `<div class="cfg-label">Connectors</div>`
     + CONNECTORS.map(m => connCardHTML(m, lines)).join("")
-    + `<div class="cfg-label">Global filters</div>`
+    + `<div class="cfg-label">LLM triage</div>`
+    + analysisCardHTML(lines)
+    + `<div class="cfg-label">Filters &amp; lifecycle</div>`
     + globalCardHTML(lines);
   paintIcons($("#cfgForm"));
 }
@@ -1314,13 +1425,23 @@ $("#cfgMode").onclick = (e) => { const b = e.target.closest("[data-mode]"); if (
 $("#cfgForm").addEventListener("click", (e) => {
   const rm = e.target.closest("[data-rm]");
   if (rm) { const i = +rm.dataset.i; cfgApplyList(rm.dataset.rm, xs => (xs.splice(i,1), xs)); return; }
-  if (e.target.closest(".sw")) return;                       // toggling enable ≠ collapsing
+  const ld = e.target.closest("[data-loc-del]");
+  if (ld) { cfgApplyLoc(ld.dataset.locDel, xs => (xs.splice(+ld.dataset.locI,1), xs)); return; }
+  const la = e.target.closest("[data-loc-add]");
+  if (la) { cfgApplyLoc(la.dataset.locAdd, xs => (xs.push({where:"", distance:""}), xs)); return; }
+  if (e.target.closest(".sw")) return;                       // toggling a switch ≠ collapsing
   const head = e.target.closest("[data-head]");
   if (head) { const id = head.dataset.head; CFG_OPEN.has(id) ? CFG_OPEN.delete(id) : CFG_OPEN.add(id); renderCfgForm(); }
 });
 $("#cfgForm").addEventListener("change", (e) => {
   const en = e.target.closest("[data-en]");
   if (en) { cfgSetEnabled(en.dataset.en, en.checked); return; }
+  const bl = e.target.closest("[data-bool]");
+  if (bl) { cfgApplyScalar(bl.dataset.bool, bl.checked ? "true" : "false"); return; }
+  const lw = e.target.closest("[data-loc-where]");
+  if (lw) { cfgApplyLoc(lw.dataset.locWhere, xs => (xs[+lw.dataset.locI].where = lw.value, xs), true); return; }
+  const ld = e.target.closest("[data-loc-dist]");
+  if (ld) { cfgApplyLoc(ld.dataset.locDist, xs => (xs[+ld.dataset.locI].distance = ld.value.trim(), xs), true); return; }
   const sc = e.target.closest("[data-scalar]");
   if (sc) cfgApplyScalar(sc.dataset.scalar, sc.value.trim());   // no re-render → keeps focus/caret
 });
