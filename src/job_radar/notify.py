@@ -1,17 +1,19 @@
-"""Telegram client — push notifications + the send/edit calls the interactive
-bot uses. Opt-in: silent no-op unless TELEGRAM_BOT_TOKEN is set. Never raises;
-a Telegram failure must not affect a scan."""
+"""Telegram transport — the raw send/edit/answer/setWebhook calls, plus the
+scan-result push. Opt-in: a silent no-op unless TELEGRAM_BOT_TOKEN is set, and
+never raises — a Telegram failure must not affect a scan. Rendering lives in
+`tgfmt`; command routing lives in `bot`."""
 
 from __future__ import annotations
 
-import html
 import os
 
 import httpx
 
+from . import tgfmt
+
 API = "https://api.telegram.org"
 TIMEOUT = 15
-MAX_LISTED = 15
+MAX_LISTED = 10   # cards in a scan push; /jobs is the paginated browser for the rest
 
 
 def _token() -> str | None:
@@ -65,22 +67,6 @@ def set_webhook(url: str, secret: str) -> bool:
     return bool(r and r.get("ok"))
 
 
-# --- formatting -----------------------------------------------------------
-
-def esc(s) -> str:
-    return html.escape(str(s if s is not None else ""))
-
-
-def job_line(j: dict) -> str:
-    """One job as a tappable HTML line: title links to the posting. Shows the full
-    `locations` set (canonical cities, dashboard/bot rows) when present, else the
-    raw `location` (fresh scan-result dicts)."""
-    title, company = esc(j.get("title")), esc(j.get("company"))
-    locs = j.get("locations")
-    loc = esc(", ".join(locs) if locs else (j.get("location") or "N/A"))
-    return f'• <a href="{esc(j.get("url"))}">{title}</a> — {company} · {loc}'
-
-
 def notify_new_jobs(result: dict) -> None:
     """Push the new matches from a scan result (run_scan() output). `new_jobs`
     holds only the rows upsert newly inserted (dedup is at write time via the
@@ -90,9 +76,7 @@ def notify_new_jobs(result: dict) -> None:
     if not new or not to:
         return
     lines = [f"🆕 <b>{len(new)}</b> new job match(es):", ""]
-    lines += [job_line(j) for j in new[:MAX_LISTED]]
+    lines += [tgfmt.job_card(j) for j in new[:MAX_LISTED]]
     if len(new) > MAX_LISTED:
-        # No pagination here — the push is fire-and-forget; /jobs is the paginated
-        # browser for the full active list.
-        lines.append(f"…and {len(new) - MAX_LISTED} more — send /jobs to browse all")
+        lines.append(f"\n…and {len(new) - MAX_LISTED} more — send /jobs to browse all")
     send_message(to, "\n".join(lines))

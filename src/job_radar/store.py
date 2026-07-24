@@ -333,6 +333,21 @@ class Store:
             d["locations"] = json.loads(d["locations"]) if d["locations"] else []
         return out
 
+    def job(self, job_id: str) -> dict | None:
+        """One job (LIST_COLS shape) by id, or None — for the Telegram detail view."""
+        row = self.con.execute(
+            f"SELECT {', '.join(self.LIST_COLS)} FROM jobs WHERE job_id = ?", [job_id]
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(zip(self.LIST_COLS, row))
+        d["locations"] = json.loads(d["locations"]) if d["locations"] else []
+        return d
+
+    def count_scored(self) -> int:
+        """How many jobs have an LLM fit score — the funnel's 'scored' stage."""
+        return self.con.execute("SELECT count(*) FROM jobs WHERE score IS NOT NULL").fetchone()[0]
+
     def expire_stale(self, max_age_hours: int, sources: list[str]) -> int:
         """Mark still-`new` jobs not seen for `max_age_hours` as `expired` — they've
         dropped off their source's listing, so the posting is closed/filled. We mark

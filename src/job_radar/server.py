@@ -456,8 +456,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         def _trigger_analyze() -> None:  # queue a batch (all untriaged, max_jobs-capped)
             _enqueue_analyze(db, "batch", None)
 
+        def _score_one(job_id: str) -> None:  # queue a single-job re-score (per-card ✨)
+            _enqueue_analyze(db, "single", [job_id])
+
         bot.handle_update(update, db, scan_fn=_trigger_scan, analyze_fn=_trigger_analyze,
-                          stop_fn=_stop_analyze)
+                          stop_fn=_stop_analyze, score_one_fn=_score_one)
         return {"ok": True}
 
     return app

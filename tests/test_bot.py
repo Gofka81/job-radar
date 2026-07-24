@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from job_radar import bot, notify
+from job_radar import bot, notify, tgfmt
 from job_radar.schema import Job
 from job_radar.store import Store
 
 ME = "12345"
+
+
+def _cb(data, mid=5):
+    return {"callback_query": {"id": "c", "from": {"id": ME}, "data": data,
+                               "message": {"chat": {"id": ME}, "message_id": mid}}}
 
 
 @pytest.fixture
@@ -118,3 +123,49 @@ def test_scan_triggers_callback(db, sent):
 def test_unknown_command_shows_help(db, sent):
     bot.handle_update(_msg("/wat"), db)
     assert "job-radar" in sent["send"][0][1]
+
+
+# --- per-job actions (redesign) -------------------------------------------
+
+def test_list_has_per_job_open_buttons(db, sent):
+    bot.handle_update(_msg("/jobs"), db)
+    _, _, markup = sent["send"][0]
+    opens = [b["callback_data"] for row in markup["inline_keyboard"] for b in row
+             if b.get("callback_data", "").startswith("open:new:0:")]
+    assert len(opens) == 8  # one per card on the page (PAGE_SIZE)
+
+
+def test_open_shows_detail_with_actions(db, sent):
+    jid = Store(db).list_jobs()[0]["job_id"]
+    bot.handle_update(_cb(f"open:new:0:{jid}"), db)
+    mid, text, markup = sent["edit"][0]
+    assert mid == 5 and "Details" in text
+    cbs = [b.get("callback_data") for row in markup["inline_keyboard"] for b in row]
+    assert f"set:applied:new:0:{jid}" in cbs and f"score:new:0:{jid}" in cbs
+    assert any(b.get("url") for row in markup["inline_keyboard"] for b in row)  # 🔗 Open link
+
+
+def test_set_status_updates_db_and_returns_to_list(db, sent):
+    jid = Store(db).list_jobs()[0]["job_id"]
+    bot.handle_update(_cb(f"set:applied:new:0:{jid}"), db)
+    s = Store(db); assert s.job(jid)["status"] == "applied"; s.close()
+    _, text, _ = sent["edit"][0]
+    assert "New jobs" in text and "(11)" in text  # actioned job left the pending list
+
+
+def test_score_one_calls_back(db, sent):
+    jid = Store(db).list_jobs()[0]["job_id"]
+    fired = []
+    bot.handle_update(_cb(f"score:new:0:{jid}"), db, score_one_fn=lambda j: fired.append(j))
+    assert fired == [jid]
+
+
+def test_funnel_shows_scored_stage(db, sent):
+    bot.handle_update(_msg("/funnel"), db)
+    assert "Scored" in sent["send"][0][1]
+
+
+def test_salary_uses_job_currency():
+    assert tgfmt.salary({"salary_min": 150000, "salary_max": 190000, "currency": "USD"}) == "$150k–$190k"
+    assert tgfmt.salary({"salary_min": 65000, "salary_max": 80000, "currency": "GBP"}) == "£65k–£80k"
+    assert tgfmt.salary({"salary_min": 100000, "currency": "EUR"}) == "€100k+"
