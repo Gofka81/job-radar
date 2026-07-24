@@ -23,11 +23,13 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from . import notify, tgfmt
 from .store import Store
 
 PAGE_SIZE = 8
+RECENT_HOURS = 48   # 🆕 New's window (matches the dashboard's "Recent 48h" default)
 
 
 def _allowed(user_id) -> bool:
@@ -63,8 +65,8 @@ class Ctx:
 
 
 def _cmd_jobs(c: Ctx) -> None:
-    if c.arg:  # text search (title + company + JD), score-sorted, one-shot (no paging)
-        text, markup = _render_list(_jobs(c.db, "new", query=c.arg), "search", 0, query=c.arg)
+    if c.arg:  # text search (title + company + JD) over ALL pending, one-shot (no paging)
+        text, markup = _render_list(_jobs(c.db, "all", query=c.arg), "search", 0, query=c.arg)
     else:
         text, markup = _render_list(_jobs(c.db, "new"), "new", 0)
     notify.send_message(c.chat, text, markup)
@@ -183,8 +185,9 @@ def _on_callback(cq: dict, db: str, analyze_fn, score_one_fn) -> None:
 # --- rendering ------------------------------------------------------------
 
 _HEADERS = {
-    "new": "🆕 <b>New jobs</b>",
-    "top": "🔝 <b>Top scored</b>",
+    "new": "🆕 <b>New jobs</b> · last 48h",   # recent, newest-first
+    "all": "📋 <b>All pending</b>",           # every pending job, newest-first
+    "top": "🔝 <b>Top scored</b>",            # scored, best first
     "search": "🔎 <b>Search</b>",
 }
 
@@ -192,7 +195,7 @@ _HEADERS = {
 def _render_list(jobs: list[dict], mode: str, page: int, query: str | None = None):
     """A page of job cards + inline keyboard. Rows: [nav] [actions] [open-N buttons].
     `open` buttons (one per card, only on paginated modes) drill into the detail view."""
-    paginated = mode in ("new", "top")
+    paginated = mode in ("new", "all", "top")
     pages = max(1, (len(jobs) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     chunk = jobs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE] if paginated else jobs[:PAGE_SIZE]
@@ -213,11 +216,14 @@ def _render_list(jobs: list[dict], mode: str, page: int, query: str | None = Non
         nav.append({"text": "◀ Prev", "callback_data": f"jobs:{mode}:{page - 1}"})
     if paginated and page < pages - 1:
         nav.append({"text": "Next ▶", "callback_data": f"jobs:{mode}:{page + 1}"})
-    actions = [
-        {"text": "✨ Analyze", "callback_data": "act:analyze"},
-        {"text": "🆕 New" if mode == "top" else "🔝 Top",
-         "callback_data": f"jobs:{'new' if mode == 'top' else 'top'}:0"},
-    ]
+    # Actions row: ✨ Analyze + view toggles (New⇄Top ranking, Recent⇄All window).
+    actions = [{"text": "✨ Analyze", "callback_data": "act:analyze"}]
+    actions.append({"text": "🆕 New", "callback_data": "jobs:new:0"} if mode == "top"
+                   else {"text": "🔝 Top", "callback_data": "jobs:top:0"})
+    if mode == "new":
+        actions.append({"text": "📅 All", "callback_data": "jobs:all:0"})
+    elif mode in ("all", "search"):
+        actions.append({"text": "🆕 Recent", "callback_data": "jobs:new:0"})
     opens = []
     if paginated:
         btns = [{"text": str(i + 1), "callback_data": f"open:{mode}:{page}:{j['job_id']}"}
@@ -251,9 +257,26 @@ def _render_detail(db: str, jid: str, mode: str, page: int):
 
 # --- data + text ----------------------------------------------------------
 
+def _first_seen(j: dict) -> datetime | None:
+    """`first_seen` as a tz-aware datetime (DuckDB hands back a naive UTC value;
+    JSON round-trips give an ISO string) — for the recency window."""
+    v = j.get("first_seen")
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v)
+        except ValueError:
+            return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    return None
+
+
 def _jobs(db: str, mode: str, query: str | None = None) -> list[dict]:
-    """Jobs for a view. 'new' = still-pending; 'top' = AI-scored only. Both are
-    score-sorted (highest first, unscored last, then newest) to match the dashboard."""
+    """Jobs for a view (list_jobs is already newest-first):
+      'new'  — pending, from the last RECENT_HOURS, kept newest-first (freshness view)
+      'all'  — every pending job, newest-first
+      'top'  — AI-scored only, best score first (unscored never shown here)
+      search — pending matches for `query` (via 'all'), newest-first."""
     s = Store(db)
     try:
         rows = s.list_jobs(1000, q=query)
@@ -261,10 +284,13 @@ def _jobs(db: str, mode: str, query: str | None = None) -> list[dict]:
         s.close()
     if mode == "top":
         rows = [j for j in rows if j.get("score") is not None]
-    else:
-        rows = [j for j in rows if j["status"] == "new"]
-    rows.sort(key=lambda j: (j.get("score") is None, -(j.get("score") or 0)))
-    return rows
+        rows.sort(key=lambda j: -(j.get("score") or 0))  # stable → newest breaks ties
+        return rows
+    rows = [j for j in rows if j["status"] == "new"]      # pending only
+    if mode == "new":                                     # recent window
+        cut = datetime.now(timezone.utc) - timedelta(hours=RECENT_HOURS)
+        rows = [j for j in rows if (fs := _first_seen(j)) and fs >= cut]
+    return rows                                           # newest-first (list_jobs order)
 
 
 def _set_status(db: str, jid: str, status: str) -> bool:

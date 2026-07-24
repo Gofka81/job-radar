@@ -13,6 +13,8 @@ def setup_logging(level: int = logging.INFO) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )
-    # Quiet the per-request firehose from HTTP libs — we log our own summaries.
-    for noisy in ("httpx", "httpcore", "apscheduler.executors.default"):
+    # Quiet the per-request firehose — HTTP client libs + uvicorn's access log
+    # (the dashboard polls /api/analyze every ~1.5s during triage; we log our own
+    # scan/triage summaries anyway). Warnings/errors from these still come through.
+    for noisy in ("httpx", "httpcore", "apscheduler.executors.default", "uvicorn.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
