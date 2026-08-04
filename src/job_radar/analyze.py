@@ -1,15 +1,14 @@
 """On-server LLM triage (Stage 1) — the only LLM step that lives in this repo.
 
 Discovery stays deterministic (HTTP + SQL, zero tokens). This scores *already
-discovered* jobs for fit, cheaply, so the phone/dashboard can rank the pending
-list without going to the PC. It is NOT part of the discovery path.
+discovered* jobs for fit, cheaply, so the phone/dashboard can rank the inbox.
+It is NOT part of the discovery path.
 
 Two engines (config `analysis.engine`):
 - 'claude-cli' (DEFAULT) — Claude Code `claude -p` on the user's Pro subscription,
   no API credits. Needs the `claude` CLI logged in (or CLAUDE_CODE_OAUTH_TOKEN).
 - 'api' — the Anthropic Messages API directly (Haiku), pay-per-token, needs
   ANTHROPIC_API_KEY. Pure Python, pydantic-validated JSON.
-Deep career-ops evaluation (Stage 2) stays on the PC / is a later, separate concern.
 
 Cost levers: Haiku + a prompt-cached rubric + triage-only-untriaged jobs keep a
 full run to pennies. The rubric (candidate profile + 0-10 scale) is personal and

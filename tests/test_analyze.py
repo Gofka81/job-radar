@@ -37,8 +37,7 @@ def test_apply_analysis_writes_score_and_reason_only(tmp_path):
     assert s.apply_analysis(jid, score=8, reason="strong Spark fit", engine="anthropic:x")
     row = s.list_jobs()[0]
     assert row["score"] == 8 and row["eval_reason"] == "strong Spark fit"
-    assert row["status"] == "new"           # workflow lane untouched → still pending
-    assert s.pending_jobs()[0]["job_id"] == jid
+    assert row["status"] == "new"           # workflow lane untouched → still in inbox
     s.close()
 
 

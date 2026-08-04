@@ -21,48 +21,23 @@ def _job(url: str, *, title: str = "Data Engineer", **kw) -> Job:
     return Job(source="reed", company="Test", title=title, url=url, **kw)
 
 
-def test_pending_lists_new_jobs_newest_first(tmp_path):
+def test_list_jobs_newest_first(tmp_path):
     s = _store(tmp_path)
     # distinct titles → distinct vacancies (same title would dedup to one row)
     assert s.upsert(_job("https://x/1", title="Data Engineer"))
     assert s.upsert(_job("https://x/2", title="Analytics Engineer"))
-    pending = s.pending_jobs()
-    assert {p["url"] for p in pending} == {"https://x/1", "https://x/2"}
-    assert set(pending[0].keys()) >= {"job_id", "url", "company", "title", "location"}
+    rows = s.list_jobs()
+    assert {r["url"] for r in rows} == {"https://x/1", "https://x/2"}
+    assert set(rows[0].keys()) >= {"job_id", "url", "company", "title", "location"}
 
 
-def test_mark_results_drops_job_from_pending(tmp_path):
+def test_set_status_moves_job_off_inbox(tmp_path):
     s = _store(tmp_path)
-    job = _job("https://x/1")
-    s.upsert(job)
-    updated = s.mark_results([{"url": "https://x/1", "score": 8.5, "status": "applied"}])
-    assert updated == 1
-    assert s.pending_jobs() == []  # no longer 'new'
+    s.upsert(_job("https://x/1"))
+    jid = s.list_jobs()[0]["job_id"]
+    assert s.set_status(jid, "applied") is True
     f = s.funnel()
     assert f["total"] == 1 and f.get("applied") == 1
-
-
-def test_mark_results_by_url(tmp_path):
-    s = _store(tmp_path)
-    s.upsert(_job("https://x/1"))
-    assert s.mark_results([{"url": "https://x/1", "score": 4.1, "status": "applied"}]) == 1
-    assert s.pending_jobs() == []
-    assert s.funnel().get("applied") == 1
-
-
-def test_mark_results_ignores_unknown_url_and_id(tmp_path):
-    s = _store(tmp_path)
-    s.upsert(_job("https://x/1"))
-    assert s.mark_results([{"job_id": "deadbeef", "status": "applied"}]) == 0
-    assert s.mark_results([{"url": "https://nope/9", "status": "applied"}]) == 0
-
-
-def test_mark_results_defaults_status_to_evaluated(tmp_path):
-    s = _store(tmp_path)
-    job = _job("https://x/1")
-    s.upsert(job)
-    s.mark_results([{"url": "https://x/1", "score": 7.0}])
-    assert s.funnel().get("evaluated") == 1
 
 
 def test_list_jobs_includes_timestamps(tmp_path):
@@ -139,7 +114,6 @@ def test_expire_marks_stale_new_job(tmp_path):
     _backdate(s, "https://x/1", 100)  # last seen 100h ago
     assert s.expire_stale(24, ["reed"]) == 1
     assert s.list_jobs()[0]["status"] == "expired"  # marked, not deleted (row kept)
-    assert s.pending_jobs() == []                   # dropped off the active feed
 
 
 def test_expire_keeps_recent_job(tmp_path):
@@ -152,7 +126,7 @@ def test_expire_keeps_human_verdict_history(tmp_path):
     s = _store(tmp_path)
     job = _job("https://x/1")
     s.upsert(job)
-    s.mark_results([{"url": "https://x/1", "status": "applied"}])
+    s.set_status(s.list_jobs()[0]["job_id"], "applied")
     _backdate(s, "https://x/1", 100)
     assert s.expire_stale(24, ["reed"]) == 0  # applied = history, never expired
 

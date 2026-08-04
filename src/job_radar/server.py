@@ -1,12 +1,8 @@
 """server-side HTTP API + dashboard. Exposed remotely via a Cloudflare Tunnel
 (cloudflared), so every data endpoint requires a bearer token.
 
-Contract with the PC (career-ops bridge):
-  GET  /api/pending  -> {"jobs": [...]}    the shortlist to evaluate
-  POST /api/results  <- {"results": [...]} verdicts; server applies them to DuckDB
-
 Run:  uvicorn job_radar.server:app   (or `job-serve`)
-The server is the only writer of the DB; the PC only reads pending + posts verdicts.
+The server is the sole writer of the DB (scan + on-server triage).
 """
 
 from __future__ import annotations
@@ -22,7 +18,7 @@ from pathlib import Path
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from . import bot, notify, setup_logging
 from .analyze import run_analyze
@@ -237,19 +233,6 @@ class AnalyzePayload(BaseModel):
     target: str | list[str] = "all_pending"
 
 
-class Verdict(BaseModel):
-    # Key by url (preferred) or job_id; the server resolves url -> job_id.
-    url: str | None = None
-    job_id: str | None = None
-    score: float | None = None
-    status: str = "evaluated"
-    report_num: int | None = None
-
-
-class ResultsPayload(BaseModel):
-    results: list[Verdict] = Field(default_factory=list)
-
-
 class StatusUpdate(BaseModel):
     # Apply-tracking from the dashboard: set ONLY the workflow status of one job.
     job_id: str
@@ -291,19 +274,6 @@ def create_app(db_path: str | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict:
         return {"ok": True}
-
-    @app.get("/api/pending")
-    def pending(_: None = Depends(require_token), store: Store = Depends(get_store)) -> dict:
-        return {"jobs": store.pending_jobs()}
-
-    @app.post("/api/results")
-    def results(
-        payload: ResultsPayload,
-        _: None = Depends(require_token),
-        store: Store = Depends(get_store),
-    ) -> dict:
-        updated = store.mark_results([v.model_dump() for v in payload.results])
-        return {"updated": updated, "received": len(payload.results)}
 
     @app.get("/api/funnel")
     def funnel(_: None = Depends(require_token), store: Store = Depends(get_store)) -> dict:

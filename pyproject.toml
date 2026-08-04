@@ -27,7 +27,6 @@ dev = [
 [project.scripts]
 job-scan = "job_radar.scan:main"
 job-serve = "job_radar.server:main"
-job-bridge = "job_radar.bridge:main"
 
 [build-system]
 requires = ["hatchling"]

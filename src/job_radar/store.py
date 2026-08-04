@@ -35,8 +35,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     currency         VARCHAR,
     remote           BOOLEAN,
     status           VARCHAR DEFAULT 'new',
-    score            DOUBLE,                -- 0-10 fit score (LLM triage OR career-ops verdict)
-    report_num       INTEGER,
+    score            DOUBLE,                -- 0-10 fit score (on-server LLM triage)
     eval_reason      VARCHAR,               -- one-line triage rationale (on-server LLM analysis)
     evaluated_at     TIMESTAMP,             -- when triage last scored this row
     engine           VARCHAR,               -- model/engine that produced score+reason
@@ -163,55 +162,11 @@ class Store:
         )
         return True
 
-    # --- API sync (server <-> PC) ---------------------------------------------
-    # A job is "pending" (needs evaluation) while status='new'. Verdicts from
-    # the PC move it to evaluated/applied/rejected/archived and drop it off the
-    # /api/pending feed. The server is the only writer of this table.
-    PENDING_COLS = (
-        "job_id", "url", "company", "title", "location", "source",
-        "posted_at", "salary_min", "salary_max", "currency", "remote",
-    )
-
-    def pending_jobs(self) -> list[dict]:
-        """Jobs still awaiting evaluation (status='new'), newest first. This is
-        the server -> PC shortlist payload. No phantom dedup needed — job_id is
-        canonical-URL based, so each ad is already a single row."""
-        rows = self.con.execute(
-            f"""SELECT {", ".join(self.PENDING_COLS)}
-                FROM jobs WHERE status = 'new'
-                ORDER BY first_seen DESC"""
-        ).fetchall()
-        return [dict(zip(self.PENDING_COLS, r)) for r in rows]
-
-    def mark_results(self, results: list[dict]) -> int:
-        """Apply PC -> server verdicts. Each result is keyed by `url` (preferred,
-        since the PC works in URLs) or `job_id`, plus optional score/status/
-        report_num. Unknown jobs are skipped. Returns rows updated."""
-        updated = 0
-        for r in results:
-            jid = r.get("job_id")
-            url = r.get("url")
-            if not jid and url:
-                row = self.con.execute(
-                    "SELECT job_id FROM jobs WHERE url = ?", [url]
-                ).fetchone()
-                jid = row[0] if row else None
-            if not jid or not self.con.execute(
-                "SELECT 1 FROM jobs WHERE job_id = ?", [jid]
-            ).fetchone():
-                continue
-            self.con.execute(
-                "UPDATE jobs SET status = ?, score = ?, report_num = ? WHERE job_id = ?",
-                [r.get("status") or "evaluated", r.get("score"), r.get("report_num"), jid],
-            )
-            updated += 1
-        return updated
-
     # --- on-server LLM triage (analyze.py) ------------------------------------
     # Triage scores fit from the stored JD. It writes score + eval_reason only —
-    # NEVER the `status` column (that's the workflow lane owned by the bridge /
-    # career-ops verdicts; pending_jobs() selects status='new', so writing status
-    # here would drop scored jobs off the PC feed).
+    # NEVER the `status` column (that's the workflow lane owned by the dashboard
+    # Tracker; jobs_for_analysis() selects status='new', so writing status here
+    # would drop scored jobs off the inbox).
     ANALYZE_COLS = ("job_id", "company", "title", "location", "locations", "description")
 
     # --- scan-time JD enrichment (Reed detail API) ------------------------
@@ -274,7 +229,7 @@ class Store:
         at: datetime | None = None,
     ) -> bool:
         """Write a triage verdict (score + reason) for one job. Leaves `status`
-        and `report_num` untouched. Returns False if the job_id is unknown."""
+        untouched. Returns False if the job_id is unknown."""
         if not self.con.execute("SELECT 1 FROM jobs WHERE job_id = ?", [job_id]).fetchone():
             return False
         self.con.execute(
@@ -293,8 +248,7 @@ class Store:
 
     def set_status(self, job_id: str, status: str) -> bool:
         """Update ONLY the workflow status (apply-tracking from the dashboard).
-        Leaves score/eval_reason/report_num intact — unlike mark_results, which is
-        the PC verdict path. Returns False if the job_id is unknown."""
+        Leaves score/eval_reason intact. Returns False if the job_id is unknown."""
         if status not in self.SETTABLE_STATUSES:
             raise ValueError(f"status must be one of {self.SETTABLE_STATUSES}")
         if not self.con.execute("SELECT 1 FROM jobs WHERE job_id = ?", [job_id]).fetchone():
@@ -356,7 +310,7 @@ class Store:
         touch a human verdict) and only the given `sources` (pass those that scanned
         OK this run, so a source outage can't expire everything). Returns rows marked.
 
-        Active views (`/api/pending`, `/jobs`, the dashboard's new filter) select
+        Active views (`/api/jobs`, the dashboard's new filter, triage) select
         `status='new'`, so expired jobs drop off them automatically."""
         if not sources or max_age_hours <= 0:
             return 0
