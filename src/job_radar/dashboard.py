@@ -455,7 +455,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <label>Min £</label><input id="fsalary" type="number" min="0" step="5000" placeholder="any" inputmode="numeric">
       <label>Sort</label>
       <select class="btn" id="sort">
-        <option value="score" selected>Score</option>
+        <option value="priority" selected>Priority</option>
+        <option value="score">Score</option>
         <option value="recent">Recent</option>
         <option value="company">Company</option>
         <option value="location">Location</option>
@@ -732,6 +733,17 @@ $("#lanes").onclick = (e) => {
 function primaryLoc(j){ const l=j.locations||[]; return l[0] || j.location || "—"; }
 function locExtra(j){ const n=(j.locations||[]).length; return n>1 ? ` +${n-1}` : ""; }
 
+// Priority cities injected from config.priority_locations (lowercased). The default
+// "Priority" sort tiers jobs so scarce roles float above London's volume:
+//   0 = a priority city (Edinburgh/Glasgow)   1 = UK-remote   2 = everything else.
+const PRIORITY_CITIES = __PRIORITY_LOCATIONS__;
+function locTier(j){
+  const locs = (j.locations || [j.location]).map(s => (s||"").toLowerCase());
+  if (locs.some(l => PRIORITY_CITIES.some(c => l.includes(c)))) return 0;
+  if (locs.some(l => /\bremote\b/.test(l))) return 1;   // US-remote is filtered at scan time
+  return 2;
+}
+
 function fillFilter(sel, label, values) {
   const cur = sel.value;
   sel.innerHTML = [`<option value="">${label}</option>`]
@@ -759,11 +771,13 @@ function viewJobs() {
      (now - new Date(j.first_seen).getTime()) <= RECENT_MS));
   const k = $("#sort").value;
   const recent = (a,b)=> (b.first_seen||"").localeCompare(a.first_seen||"");
-  const by = { recent,
+  // highest score first; unscored (null) sink to the bottom; ties → newest
+  const byScore = (a,b)=> ((b.score??-1)-(a.score??-1)) || recent(a,b);
+  const by = { recent, score: byScore,
                company:(a,b)=> (a.company||"").localeCompare(b.company||""),
                location:(a,b)=> primaryLoc(a).localeCompare(primaryLoc(b)),
-               // highest score first; unscored (null) sink to the bottom; ties → newest
-               score:(a,b)=> ((b.score??-1)-(a.score??-1)) || recent(a,b) };
+               // default: priority city → UK-remote → London, best score within each tier
+               priority:(a,b)=> (locTier(a)-locTier(b)) || byScore(a,b) };
   v.sort(by[k]);
 
   // paginate the sorted/filtered set (PAGE clamped in case the set shrank)

@@ -284,7 +284,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
         """The phone-friendly dashboard shell. Loads open (no token needed for the
         HTML itself); the page then prompts for the API token and calls the
         bearer-gated /api/* endpoints with it."""
-        return DASHBOARD_HTML
+        prio = [str(c).lower() for c in (load_config().get("priority_locations") or [])]
+        return DASHBOARD_HTML.replace(
+            "__PRIORITY_LOCATIONS__", json.dumps(prio or ["edinburgh", "glasgow"]))
 
     @app.get("/healthz")
     def healthz() -> dict:

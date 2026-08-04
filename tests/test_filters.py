@@ -32,6 +32,28 @@ def test_location_no_config_passes_all():
     assert ok("Anywhere")
 
 
+def test_location_word_boundary_no_substring_false_positives():
+    ok = build_location_filter({"allow": ["uk", "us"]})
+    assert ok("London, UK")          # "UK" is a whole token
+    assert ok("Austin, TX, US")      # "US" is a whole token
+    assert not ok("Milwaukee, WI")   # "uk" is INSIDE milwaukee → not a match
+    assert not ok("Houston, TX")     # "us" is INSIDE houston → not a match
+
+
+def test_location_block_beats_allow_for_us_remote():
+    # the real leak: allow lets remote through, but a US-remote must be blocked
+    ok = build_location_filter({
+        "allow": ["edinburgh", "glasgow", "scotland", "london", "remote"],
+        "block": ["usa", "united states"],
+    })
+    assert ok("Edinburgh, Scotland, United Kingdom")
+    assert ok("London, England, United Kingdom")
+    assert ok("Remote")
+    assert not ok("USA - Remote")                     # block wins over "remote"
+    assert not ok("Manchester, England, United Kingdom")   # other-UK dropped (no allow term)
+    assert not ok("Belfast, Northern Ireland, United Kingdom")
+
+
 def test_vacancy_key_is_stable_and_source_city_agnostic():
     a = make_vacancy_key("Acme", "Data Engineer", "https://x/1")
     assert a == make_vacancy_key("Acme", "Data Engineer", "https://x/1")

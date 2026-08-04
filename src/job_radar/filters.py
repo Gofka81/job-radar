@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 
@@ -18,21 +19,28 @@ def build_title_filter(cfg: dict) -> Callable[[str], bool]:
 
 
 def build_location_filter(cfg: dict | None) -> Callable[[str], bool]:
-    """No config => everything passes. block wins over allow. Empty location passes."""
+    """No config => everything passes. block wins over allow. Empty location passes.
+
+    Terms match on WORD BOUNDARIES, not raw substring — so "UK" matches the token
+    "UK" in "London, UK" but never inside "Milwaukee", and "Remote" in the allow
+    list can't wave through "USA - Remote" once "USA" is on the block list."""
     if not cfg:
         return lambda _location: True
 
-    allow = [k.lower() for k in cfg.get("allow", [])]
-    block = [k.lower() for k in cfg.get("block", [])]
+    def compile_terms(terms):
+        return [re.compile(r"\b" + re.escape(str(k).lower()) + r"\b") for k in terms]
+
+    allow = compile_terms(cfg.get("allow", []))
+    block = compile_terms(cfg.get("block", []))
 
     def ok(location: str) -> bool:
         if not location:
             return True
         loc = location.lower()
-        if block and any(k in loc for k in block):
+        if block and any(r.search(loc) for r in block):
             return False
         if not allow:
             return True
-        return any(k in loc for k in allow)
+        return any(r.search(loc) for r in allow)
 
     return ok
