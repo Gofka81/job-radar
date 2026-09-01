@@ -76,3 +76,22 @@ def test_remote_job_bypasses_city_whitelist():
 def test_allow_remote_can_be_switched_off():
     ok = build_location_filter({"allow": ["London"], "allow_remote": False})
     assert ok("Manchester", True) is False        # opt back into city-only matching
+
+
+def test_remote_bypass_is_anchored_to_the_uk():
+    """An unanchored remote bypass admits any country not explicitly blocked, which
+    defeats the whitelist. The default anchor is the offline GB reference, so bare
+    UK city names (which most sources emit) still pass."""
+    ok = build_location_filter({"allow": ["Edinburgh", "London"], "block": ["USA"]})
+    assert ok("Bristol", True) is True             # UK city, no country suffix
+    assert ok("Milton Keynes", True) is True
+    assert ok("England, United Kingdom", True) is True
+    assert ok("Munich", True) is False             # remote-in-Germany, not a UK job
+    assert ok("Berlin", True) is False
+    assert ok("Bristol", None) is False            # non-remote unchanged: still dropped
+
+
+def test_remote_allow_overrides_the_default_anchor():
+    ok = build_location_filter({"allow": ["London"], "remote_allow": ["Germany", "Munich"]})
+    assert ok("Munich", True) is True              # explicitly opted into
+    assert ok("Bristol", True) is False            # term list replaces the GB anchor

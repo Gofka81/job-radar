@@ -283,7 +283,7 @@ class Store:
     LIST_COLS = (
         "job_id", "source", "company", "title", "url", "location", "locations",
         "status", "score", "eval_reason", "salary_min", "salary_max", "currency",
-        "first_seen", "last_seen",
+        "remote", "first_seen", "last_seen",
     )
 
     def list_jobs(self, limit: int = 500, q: str | None = None) -> list[dict]:

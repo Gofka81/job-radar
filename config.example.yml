@@ -37,7 +37,15 @@ location_filter:
   # even when its city isn't on the allow list. Boards label a remote role with the
   # EMPLOYER's city, not "Remote", so a city whitelist otherwise drops the whole
   # remote bucket. The block list still applies, so US/India-remote stays out.
+  #
+  # That bypass is ANCHORED so it can't admit any country you haven't blocked: by
+  # default a remote job must resolve to a place the offline GB reference knows
+  # (clean_location), which passes bare UK city names like "Bristol"/"Milton Keynes"
+  # — most sources emit no country suffix — and rejects Munich/Berlin/Austin. A role
+  # posted in Munich as "remote" nearly always means remote *within Germany*.
+  # Set remote_allow to a term list to anchor on that instead of the GB reference.
   allow_remote: true
+  # remote_allow: ["United Kingdom", "Ireland"]   # optional: replaces the GB anchor
   allow:
     - "New York"
     - "San Francisco"

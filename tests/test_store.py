@@ -243,3 +243,15 @@ def test_attach_history_without_archive_mirrors_jobs(tmp_path):
     assert s.attach_history(tmp_path / "nope") is False
     assert s.con.execute("SELECT count(*) FROM jobs_all").fetchone()[0] == 1
     s.close()
+
+
+def test_list_jobs_exposes_remote_for_the_dashboard_badge(tmp_path):
+    """The dashboard badges remote roles off this flag — it used to guess with a
+    regex on the location text, which misses roles labelled with a city."""
+    s = _store(tmp_path)
+    s.upsert(_job("https://x/r", title="Data Engineer", remote=True, location="Manchester"))
+    s.upsert(_job("https://x/o", title="Data Engineer II", location="London"))
+    rows = {r["url"]: r for r in s.list_jobs()}
+    assert rows["https://x/r"]["remote"] is True
+    assert rows["https://x/o"]["remote"] in (None, False)
+    s.close()

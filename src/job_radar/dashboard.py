@@ -23,6 +23,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     --new:#12924f; --new-fg:#ffffff; --shadow:0 1px 2px rgba(20,25,40,.06);
     --sc-hi-bg:#d8f6e4; --sc-hi-fg:#0c7a3d; --sc-mid-bg:#fbefcd; --sc-mid-fg:#8a6800;
     --sc-lo-bg:#fbdede; --sc-lo-fg:#b32424; --danger:#e23b3b;
+    --rem-bg:#dfeaff; --rem-fg:#1d4ed8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -31,6 +32,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       --new:#2ecc71; --new-fg:#06210f; --shadow:none;
       --sc-hi-bg:#173226; --sc-hi-fg:#7CFC9E; --sc-mid-bg:#332c18; --sc-mid-fg:#FFD479;
       --sc-lo-bg:#331a1a; --sc-lo-fg:#ff9b9b; --danger:#ff6b6b;
+      --rem-bg:#16233d; --rem-fg:#9ec5ff;
     }
   }
   :root[data-theme="light"] {
@@ -39,6 +41,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     --new:#12924f; --new-fg:#ffffff; --shadow:0 1px 2px rgba(20,25,40,.06);
     --sc-hi-bg:#d8f6e4; --sc-hi-fg:#0c7a3d; --sc-mid-bg:#fbefcd; --sc-mid-fg:#8a6800;
     --sc-lo-bg:#fbdede; --sc-lo-fg:#b32424; --danger:#e23b3b;
+    --rem-bg:#dfeaff; --rem-fg:#1d4ed8;
   }
   :root[data-theme="dark"] {
     --bg:#0f1115; --card:#181b22; --line:#282c36; --fg:#e6e8ec; --muted:#8b909c;
@@ -46,6 +49,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     --new:#2ecc71; --new-fg:#06210f; --shadow:none;
     --sc-hi-bg:#173226; --sc-hi-fg:#7CFC9E; --sc-mid-bg:#332c18; --sc-mid-fg:#FFD479;
     --sc-lo-bg:#331a1a; --sc-lo-fg:#ff9b9b; --danger:#ff6b6b;
+      --rem-bg:#16233d; --rem-fg:#9ec5ff;
   }
 
   * { box-sizing:border-box; }
@@ -170,6 +174,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .meta .co { font-weight:600; color:var(--fg); }
   .pill { background:var(--pill); color:var(--pill-fg); border-radius:20px; padding:1px 9px; font-size:12px; }
   .pill.new { background:var(--new); color:var(--new-fg); font-weight:700; }
+  .pill.remote { background:var(--rem-bg); color:var(--rem-fg); font-weight:650; }
   .reason { color:var(--muted); font-size:13px; margin-top:9px; line-height:1.45;
             border-top:1px solid var(--line); padding-top:8px; }
   .empty { color:var(--muted); text-align:center; padding:40px 16px; font-size:14px; }
@@ -740,7 +745,10 @@ const PRIORITY_CITIES = __PRIORITY_LOCATIONS__;
 function locTier(j){
   const locs = (j.locations || [j.location]).map(s => (s||"").toLowerCase());
   if (locs.some(l => PRIORITY_CITIES.some(c => l.includes(c)))) return 0;
-  if (locs.some(l => /\bremote\b/.test(l))) return 1;   // US-remote is filtered at scan time
+  // The `remote` flag is set by the connector (detect_remote / the board's own field)
+  // and is what the location filter uses. Boards label a remote role with the
+  // EMPLOYER's city, so the old text regex missed almost all of them.
+  if (j.remote || locs.some(l => /\bremote\b/.test(l))) return 1;
   return 2;
 }
 
@@ -866,6 +874,7 @@ function render(list) {
       <div class="meta">
         <span class="co">${esc(j.company)}</span>
         <span class="pill">${esc(primaryLoc(j))}${locExtra(j)}</span>
+        ${j.remote ? '<span class="pill remote" title="Remote role — confirmed from the job description">Remote</span>' : ""}
         ${sal ? `<span class="pill">${sal}</span>` : ""}
         <span class="pill">${esc(j.source)}</span>
         ${j.status && j.status !== "new" && j.status !== "viewed"
