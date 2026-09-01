@@ -5,7 +5,7 @@ import json
 import httpx
 import respx
 
-from job_radar.sources import adzuna, indeed, oracle, reed, workday
+from job_radar.sources import adzuna, indeed, linkedin, oracle, reed, workday
 
 
 @respx.mock
@@ -287,3 +287,121 @@ def test_indeed_or_joins_queries_per_location():
     assert all(r'\"data engineer\" OR \"databricks\"' in q for q in queries)
     assert any('where: "Glasgow"' in q for q in queries)
     assert any("location:" not in q for q in queries)  # nationwide pass omits location
+
+
+def test_linkedin_full_description_parses_guest_detail(monkeypatch):
+    """The guest card carries no JD; the detail endpoint is what fills it in."""
+    from job_radar.sources import linkedin
+    html = ('<div class="show-more-less-html__markup relative">We need '
+            '<strong>PySpark</strong> &amp; Delta Lake.</div>')
+    monkeypatch.setattr(linkedin._ProxyPool, "get",
+                        lambda self, url, params: httpx.Response(200, text=html))
+    raw = {"card_url": "https://www.linkedin.com/jobs/view/data-engineer-at-acme-4454566336"}
+    # tags become a space, not "" — block markup must not weld words together
+    assert linkedin.full_description(raw, None, {}) == "We need PySpark & Delta Lake."
+
+
+def test_linkedin_full_description_bad_url_or_failure(monkeypatch):
+    from job_radar.sources import linkedin
+    assert linkedin.full_description({"card_url": "https://x/nope"}, None, {}) is None
+    monkeypatch.setattr(linkedin._ProxyPool, "get", lambda self, url, params: None)
+    raw = {"card_url": "https://www.linkedin.com/jobs/view/x-4454566336"}
+    assert linkedin.full_description(raw, None, {}) is None  # all proxies dead → keep stub
+
+
+def test_linkedin_cards_are_flagged_for_enrichment():
+    from job_radar.sources import linkedin
+    card = ('<a href="https://www.linkedin.com/jobs/view/de-at-acme-123?trk=x">'
+            '<h3 class="base-search-card__title">Data Engineer</h3>')
+    job = linkedin._parse_card(card)
+    assert job.description == "" and job.jd_full is False
+
+
+def test_lever_description_joins_all_sections():
+    """Lever splits a posting across descriptionPlain + lists + additionalPlain;
+    taking only the first dropped the requirements/tech-stack section."""
+    from job_radar.sources import lever
+    posting = {
+        "descriptionPlain": "We build data platforms.",
+        "lists": [{"text": "Who You Are:", "content": "<li>PySpark</li><li>Delta Lake</li>"}],
+        "additionalPlain": "We are an equal opportunity employer.",
+    }
+    d = lever._description(posting)
+    assert "We build data platforms." in d
+    assert "Who You Are:" in d and "PySpark" in d and "Delta Lake" in d  # was dropped
+    assert "equal opportunity" in d
+
+
+def test_lever_description_tolerates_missing_sections():
+    from job_radar.sources import lever
+    assert lever._description({"descriptionPlain": "Only an intro."}) == "Only an intro."
+    assert lever._description({}) == ""
+
+
+def test_workable_description_joins_split_fields():
+    from job_radar.sources import workable
+    d = workable._description({"description": "<p>The role.</p>",
+                               "requirements": "<p>5y Spark.</p>", "benefits": "<p>Pension.</p>"})
+    assert "The role." in d and "5y Spark." in d and "Pension." in d
+
+
+def _li_page(*jobs) -> str:
+    """Minimal guest-search HTML: one <li> card per (id, title, location)."""
+    return "".join(
+        f'<li><a href="https://www.linkedin.com/jobs/view/x-{i}?trk=z">'
+        f'<h3 class="base-search-card__title">{t}</h3>'
+        f'<span class="job-search-card__location">{loc}</span></a></li>'
+        for i, t, loc in jobs)
+
+
+def test_linkedin_remote_pass_rescues_verified_remote_jobs(monkeypatch):
+    """The remote keyword pass finds jobs a city whitelist would drop; each hit is
+    CONFIRMED against its JD so keyword-only mentions don't slip through."""
+    pages = {}
+
+    def fake_page(pool, params):
+        first = params["start"] == 0
+        if "AND remote" in params["keywords"]:
+            return _li_page(("200", "Data Engineer", "Manchester"),
+                            ("201", "Data Engineer", "Leeds")) if first else ""
+        return _li_page(("100", "Data Engineer", "London")) if first else ""
+
+    jds = {"200": "This is a fully remote role.", "201": "You will build remote sensing kit."}
+    monkeypatch.setattr(linkedin, "_page_html", fake_page)
+    monkeypatch.setattr(linkedin, "full_description",
+                        lambda raw, http, cfg=None: jds[raw["card_url"].rsplit("-", 1)[1]])
+
+    jobs = linkedin.fetch({"queries": ["data engineer"], "locations": [{"where": "UK"}],
+                           "max_pages": 1, "request_delay": 0, "remote_pass": True,
+                           "remote_max_pages": 1}, None)
+    by_loc = {j.location: j for j in jobs}
+    assert by_loc["Manchester"].remote is True          # verified remote → rescued
+    assert by_loc["Manchester"].description and by_loc["Manchester"].jd_full  # enriched free
+    assert by_loc["Leeds"].remote is not True           # "remote sensing" is job CONTENT
+    assert by_loc["London"].remote is not True          # main pass untouched
+
+
+def test_linkedin_remote_pass_is_off_by_default(monkeypatch):
+    monkeypatch.setattr(linkedin, "_page_html",
+                        lambda pool, params: _li_page(("1", "Data Engineer", "London"))
+                        if params["start"] == 0 else "")
+    calls = []
+    monkeypatch.setattr(linkedin, "full_description",
+                        lambda raw, http, cfg=None: calls.append(1) or "remote")
+    jobs = linkedin.fetch({"queries": ["data engineer"], "locations": [{"where": "UK"}],
+                           "max_pages": 1, "request_delay": 0}, None)
+    assert len(jobs) == 1 and not calls          # no extra search, no detail fetches
+
+
+def test_linkedin_remote_verify_budget_caps_detail_fetches(monkeypatch):
+    monkeypatch.setattr(linkedin, "_page_html", lambda pool, params: (
+        _li_page(*[(str(i), "Data Engineer", "Leeds") for i in range(5)])
+        if params["start"] == 0 and "AND remote" in params["keywords"] else ""))
+    calls = []
+    monkeypatch.setattr(linkedin, "full_description",
+                        lambda raw, http, cfg=None: (calls.append(1), "fully remote role")[1])
+    jobs = linkedin.fetch({"queries": ["de"], "locations": [{"where": "UK"}], "max_pages": 1,
+                           "request_delay": 0, "remote_pass": True, "remote_verify_max": 2}, None)
+    assert len(calls) == 2                      # budget honoured
+    assert sum(1 for j in jobs if j.remote is True) == 2
+    assert sum(1 for j in jobs if j.remote is None) == 3   # unverified → no regression

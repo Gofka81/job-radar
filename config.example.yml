@@ -33,6 +33,11 @@ title_filter:
 # --- Location filter ---
 # block wins over allow. Empty job location passes (don't penalise missing data).
 location_filter:
+  # allow_remote (default true): let a job the connector flagged remote=True through
+  # even when its city isn't on the allow list. Boards label a remote role with the
+  # EMPLOYER's city, not "Remote", so a city whitelist otherwise drops the whole
+  # remote bucket. The block list still applies, so US/India-remote stays out.
+  allow_remote: true
   allow:
     - "New York"
     - "San Francisco"
@@ -76,11 +81,31 @@ expire_after_hours: 24
 # scans (a job not re-seen by the tight hourly scans would otherwise expire in 24h).
 # recent_days: 1
 
-# After a scan, fetch the FULL JD for sources whose search response is only a
-# snippet but expose a detail API (currently Reed: 452-char snippet → full text).
-# Deterministic API call (not scraping); one-shot per job via the jd_full flag.
-# Adzuna stays a snippet (no full-JD API). Set false to disable.
+# After a scan, fetch the FULL JD for sources whose search response carries only a
+# stub, from that source's detail endpoint. Deterministic HTTP (not scraping, no LLM);
+# one request per NEW job, once ever (the jd_full flag flips on success).
+#   reed     452-char snippet  -> full text (detail API)
+#   linkedin NO description    -> full text (guest job-detail endpoint)
+#   oracle   short blurb       -> full text (requisition detail feed)
+# Adzuna stays a snippet (no detail API) — but a merge with a fuller-JD source upgrades it.
+# full_jd_max caps the per-scan burst; the backlog drains over subsequent scans.
 fetch_full_jd: true
+full_jd_max: 150
+
+# --- Cold history (Parquet archive) ---
+# Rows expired longer than this move OUT of the live DB into month-partitioned
+# Parquet (data/archive/month=YYYY-MM/part.parquet), keeping the hot path small
+# while every row is kept forever for analytics. Write-verify-delete: the file is
+# read back and row-counted before anything is deleted. Rows you acted on
+# (applied/rejected/saved) are NEVER archived, whatever their age.
+# Query live+history together via the `jobs_all` view (Store.attach_history).
+# Unset to disable archiving entirely.
+archive_after_days: 30
+# archive_dir: /custom/path        # default: <db dir>/archive (same volume)
+#
+# NOTE: archiving DELETEs rows, and DuckDB has no VACUUM — it never shrinks in
+# place. Reclaim the freed space with `job-scan --compact` (stop the server first;
+# it replaces the DB file). Measured on prod: 10.76 MB -> 3.42 MB + 0.39 MB Parquet.
 
 # --- Sources ---
 sources:
@@ -145,6 +170,18 @@ sources:
     hours_old: 168             # f_TPR window (last N hours posted); the main page-cut.
                                # Regular scans tighten this via recent_days×24 if set.
     max_pages: 2               # start-paginated @ up to 25/page; early-stops on empty
+    # Remote pass: LinkedIn labels a remote role with the EMPLOYER's city and its
+    # guest card has no workplace-type field (f_WT is IGNORED on this endpoint —
+    # on-site/remote/hybrid return identical results), so remote roles outside your
+    # allowed cities are invisible. This runs ONE extra search per location with
+    # "AND remote" appended, then CONFIRMS each hit against its JD (measured: ~70-80%
+    # genuinely remote vs 0% in the plain query; the JD check rejects the rest).
+    # Verified hits arrive with their JD already filled in, so they skip enrichment.
+    # Cost: 1 extra search + up to remote_verify_max detail fetches per location.
+    remote_pass: true
+    remote_max_pages: 2        # pages for the remote search (keep small — it is precise)
+    remote_verify_max: 40      # cap on JD confirmations per scan; beyond it remote stays
+                               # unknown, i.e. exactly today's behaviour (no regression)
     request_delay: 1.5         # seconds between pages (politeness; + jitter)
     # Rotating proxies (e.g. Webshare free tier = 10 datacenter IPs). Bare host:port or a
     # full user:pass@host:port; a 429/dead IP rotates to the next. Empty = direct

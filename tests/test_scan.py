@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from job_radar import scan
 from job_radar.schema import Job
 
@@ -44,10 +46,11 @@ class _ReedSnippet:
 
 
 def test_run_scan_enriches_reed_jd_once(tmp_path, monkeypatch):
-    from job_radar.sources import reed
     from job_radar.store import Store
+    # scan.py dispatches enrichment off the REGISTRY module's own full_description
+    monkeypatch.setattr(_ReedSnippet, "full_description",
+                        staticmethod(lambda raw, http, cfg=None: "FULL JD " * 100), raising=False)
     monkeypatch.setattr(scan, "REGISTRY", {"reed": _ReedSnippet})
-    monkeypatch.setattr(reed, "full_description", lambda raw, http, key=None: "FULL JD " * 100)
     db = str(tmp_path / "db.duckdb")
     cfg = {"sources": {"reed": {"enabled": True}}}
 
@@ -91,3 +94,25 @@ def test_run_scan_dry_run_writes_nothing(tmp_path, monkeypatch):
     result = scan.run_scan({"sources": {"fake": {"enabled": True}}}, str(db), dry_run=True)
     assert result["totals"]["new"] == 1
     assert not db.exists()  # dry run never opens/creates the DB
+
+
+def test_compact_db_reclaims_space_without_losing_rows(tmp_path):
+    """DuckDB has no VACUUM; deletes leave the file fragmented. compact_db rewrites
+    it, and must carry over EVERY table (jobs, scan_runs, llm_runs), not just jobs."""
+    from job_radar.scan import compact_db
+    from job_radar.store import Store
+    db = str(tmp_path / "db.duckdb")
+    s = Store(db)
+    for i in range(200):
+        s.upsert(Job(source="reed", company=f"Co{i}", title="Data Engineer",
+                     url=f"https://x/{i}", location="Edinburgh", description="x" * 3000))
+    s.record_run("run1", datetime.now(timezone.utc), "reed", 1, 1, 0, 0, 0)
+    s.con.execute("DELETE FROM jobs WHERE company LIKE 'Co1%'")
+    s.close()
+
+    before, after = compact_db(db)
+    assert after < before                                  # space actually reclaimed
+    s = Store(db)
+    assert s.con.execute("SELECT count(*) FROM jobs").fetchone()[0] > 0
+    assert s.con.execute("SELECT count(*) FROM scan_runs").fetchone()[0] == 1  # not dropped
+    s.close()

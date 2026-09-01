@@ -9,6 +9,39 @@ TIMEOUT = 15.0
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
+# Phrases that mean "you can do this job from anywhere", not just any use of the
+# word "remote" — "remote sensing"/"remote monitoring"/"remote desktop" are job
+# CONTENT, not work arrangement, and would otherwise wave through on-site roles.
+_REMOTE_RE = re.compile(
+    r"\b(fully[- ]remote|100%\s*remote|remote[- ]first|remote[- ]based|home[- ]?based"
+    r"|work(ing)? from home|wfh|uk[- ]remote|remote \(uk"
+    r"|remote (role|position|opportunity|working|vacancy))\b", re.I)
+# Hybrid still requires you on site N days a week, so it must NOT bypass a city
+# filter — a "hybrid, 2 days remote" role in Manchester is a Manchester job.
+_HYBRID_RE = re.compile(r"\bhybrid\b", re.I)
+
+
+def detect_remote(title: str, location: str, description: str = "") -> bool | None:
+    """True if the posting reads as genuinely remote, False if explicitly hybrid,
+    None if unknown. Connectors that get no structured work-type field (most of
+    them) use this so `location_filter.allow_remote` has something to act on."""
+    loc = (location or "").lower()
+    if re.search(r"\bremote\b", loc) and not _HYBRID_RE.search(loc):
+        return True  # the board put it in the location field — strongest signal
+    # A bare "Remote" in the TITLE is a work-arrangement signal (titles are short
+    # and deliberate) — except where it names the job's subject matter, as in
+    # "Remote Sensing Engineer". This is LinkedIn's only signal: its guest card has
+    # no workplace-type field and no JD at filter time.
+    ttl = (title or "").lower()
+    if re.search(r"\bremote\b(?!\s+(sensing|monitoring|desktop|access|support|control))", ttl):
+        return False if _HYBRID_RE.search(ttl) else True
+    hay = f"{title or ''}\n{description or ''}"
+    if _REMOTE_RE.search(hay):
+        return False if _HYBRID_RE.search(hay) else True
+    if _HYBRID_RE.search(hay):
+        return False
+    return None
+
 
 def client() -> httpx.Client:
     return httpx.Client(

@@ -6,7 +6,7 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
-from .base import cfg_locations, strip_tags
+from .base import detect_remote, cfg_locations, strip_tags
 
 ID = "adzuna"
 BASE = "https://api.adzuna.com/v1/api/jobs"
@@ -86,6 +86,11 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                             salary_min=it.get("salary_min"),
                             salary_max=it.get("salary_max"),
                             currency="GBP" if country == "gb" else None,
+                            remote=detect_remote(
+                                strip_tags(it.get("title", "")),
+                                (it.get("location") or {}).get("display_name", "") or "",
+                                strip_tags(it.get("description", "")),
+                            ),
                             raw=it,
                         )
                     )

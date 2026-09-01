@@ -61,3 +61,18 @@ def test_vacancy_key_is_stable_and_source_city_agnostic():
     # still hashes the same — the same role at the same company is one vacancy.
     job = Job(source="adzuna", company="Acme", title="Data Engineer", url="https://x/9", location="London, UK")
     assert job.vacancy_key == a
+
+
+def test_remote_job_bypasses_city_whitelist():
+    """Boards label a remote role with the EMPLOYER's city, so a city-only whitelist
+    silently dropped the whole remote bucket."""
+    ok = build_location_filter({"allow": ["Edinburgh", "London"], "block": ["USA"]})
+    assert ok("Manchester", None) is False        # on-site elsewhere → still dropped
+    assert ok("Manchester", True) is True         # remote → allowed through
+    assert ok("London", None) is True             # whitelisted city → unchanged
+    assert ok("Austin, USA", True) is False       # block still wins over remote
+
+
+def test_allow_remote_can_be_switched_off():
+    ok = build_location_filter({"allow": ["London"], "allow_remote": False})
+    assert ok("Manchester", True) is False        # opt back into city-only matching

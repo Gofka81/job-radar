@@ -5,7 +5,7 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
-from .base import strip_tags
+from .base import detect_remote, strip_tags
 
 ID = "workday"
 # Workday self-hosts per tenant; the public careers site is backed by the "CXS"
@@ -101,6 +101,7 @@ def _postings(http, cxs, host, lang, site, company, p, path) -> list[Job]:
         locations = [p.get("locationsText", "") or ""]
     return [
         Job(source=ID, company=company, title=title, url=url, location=loc,
-            description=description, posted_at=posted, raw=p)
+            description=description, remote=detect_remote(title, loc, description),
+            posted_at=posted, raw=p)
         for loc in locations
     ]

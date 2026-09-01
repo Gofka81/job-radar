@@ -5,14 +5,17 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
-from .base import strip_tags
+from .base import detect_remote, strip_tags
 
 ID = "oracle"
 # Oracle Cloud Recruiting (ORC / Fusion HCM CandidateExperience) — self-hosted per
 # tenant (UK banks: JPMorgan, etc.). The public REST feed needs the careers
 # `siteNumber` from the URL https://{host}/hcmUI/CandidateExperience/en/sites/{site}.
-# `keyword` searches the full JD server-side, so the stored snippet is enough.
+# `keyword` searches the full JD server-side, but the LIST only returns a short
+# blurb (`ShortDescriptionStr`) — the real JD comes from the per-requisition detail
+# feed, fetched once per job after the scan (see full_description).
 _PATH = "/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+_DETAIL = "/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
 _PAGE = 20
 
 
@@ -87,8 +90,36 @@ def _postings(host: str, site: str, company: str, r: dict) -> list[Job]:
     title = r.get("Title", "") or ""
     desc = strip_tags(r.get("ShortDescriptionStr", "") or "")
     posted = _parse_date(r.get("PostedDate"))
+    # Stash host/site in raw: the post-scan detail fetch needs them to build its URL.
+    raw = {**r, "_host": host, "_site": site}
     return [
         Job(source=ID, company=company, title=title, url=url, location=loc,
-            description=desc, posted_at=posted, raw=r)
+            description=desc, jd_full=False,  # blurb only → enriched via _DETAIL
+            remote=detect_remote(title, loc, desc), posted_at=posted, raw=raw)
         for loc in (_locations(r) or [""])
     ]
+
+
+def full_description(raw: dict, http: httpx.Client, cfg: dict | None = None) -> str | None:
+    """Full JD from the per-requisition detail feed. The list endpoint only carries
+    `ShortDescriptionStr` (a blurb), which is too thin to search or triage on.
+    Returns None on any failure — the caller keeps the blurb and retries next scan."""
+    rid, host, site = (raw or {}).get("Id"), (raw or {}).get("_host"), (raw or {}).get("_site")
+    if not (rid and host and site):
+        return None
+    try:
+        r = http.get(f"https://{host}{_DETAIL}", headers={"accept": "application/json"},
+                     params={"onlyData": "true", "expand": "all",
+                             "finder": f'ByIdAndSiteNumber;Id="{rid}",siteNumber={site}'})
+        if r.status_code != 200:
+            return None
+        items = r.json().get("items") or []
+        if not items:
+            return None
+        d = items[0]
+        text = " ".join(strip_tags(d.get(k) or "") for k in
+                        ("CorporateDescriptionStr", "ExternalDescriptionStr",
+                         "ExternalQualificationsStr", "ExternalResponsibilitiesStr"))
+        return text.strip() or None
+    except (httpx.HTTPError, ValueError):
+        return None

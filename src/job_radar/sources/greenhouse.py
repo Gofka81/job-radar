@@ -5,7 +5,7 @@ import html
 import httpx
 
 from ..schema import Job
-from .base import strip_tags
+from .base import detect_remote, strip_tags
 
 ID = "greenhouse"
 BASE = "https://boards-api.greenhouse.io/v1/boards"
@@ -32,7 +32,9 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                     url=url,
                     location=(it.get("location") or {}).get("name", "") or "",
                     # content is HTML-escaped HTML: unescape entities, then drop tags
-                    description=strip_tags(html.unescape(it.get("content", "") or "")),
+                    description=(_gh_desc := strip_tags(html.unescape(it.get("content", "") or ""))),
+                    remote=detect_remote(it.get("title", "") or "",
+                                         (it.get("location") or {}).get("name", "") or "", _gh_desc),
                     raw=it,
                 )
             )

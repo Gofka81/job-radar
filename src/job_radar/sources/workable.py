@@ -5,7 +5,7 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
-from .base import strip_tags
+from .base import detect_remote, strip_tags
 
 ID = "workable"
 # Public widget JSON — no auth. Slug is the apply.workable.com/{slug} subpath.
@@ -19,6 +19,15 @@ def _parse_date(s: str | None) -> date | None:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except ValueError:
         return None
+
+
+def _description(it: dict) -> str:
+    """Workable can split a posting into description + requirements + benefits.
+    The user's current boards put everything in `description` (the others come back
+    empty), but boards that do split would otherwise lose their requirements section
+    — the part triage needs. Join whatever is present."""
+    parts = [strip_tags(it.get(k) or "") for k in ("description", "requirements", "benefits")]
+    return "\n\n".join(p for p in parts if p)
 
 
 def _location(it: dict) -> str:
@@ -45,9 +54,10 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                     title=it.get("title", "") or "",
                     url=url,
                     location=_location(it),
-                    description=strip_tags(it.get("description", "")),
+                    description=_description(it),
                     posted_at=_parse_date(it.get("published_on")),
-                    remote=it.get("telecommuting"),
+                    remote=it.get("telecommuting") if it.get("telecommuting") is not None
+                    else detect_remote(it.get("title", "") or "", _location(it), _description(it)),
                     raw=it,
                 )
             )

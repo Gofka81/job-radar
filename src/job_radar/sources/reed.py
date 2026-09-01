@@ -6,20 +6,20 @@ from datetime import date, datetime
 import httpx
 
 from ..schema import Job
-from .base import cfg_locations, strip_tags
+from .base import detect_remote, cfg_locations, strip_tags
 
 ID = "reed"
 BASE = "https://www.reed.co.uk/api/1.0/search"
 DETAIL = "https://www.reed.co.uk/api/1.0/jobs"  # per-job detail → FULL description
 
 
-def full_description(raw: dict, http: httpx.Client, key: str | None = None) -> str | None:
+def full_description(raw: dict, http: httpx.Client, cfg: dict | None = None) -> str | None:
     """Fetch the FULL job description from Reed's per-job detail API. The search
     endpoint only returns a ~450-char snippet; this returns the whole thing. A
     deterministic API call (same HTTP Basic key), NOT scraping. Returns stripped
     text, or None on any failure / missing id (caller keeps the snippet)."""
     job_id = (raw or {}).get("jobId")
-    key = key or os.environ.get("REED_API_KEY")
+    key = os.environ.get("REED_API_KEY")
     if not job_id or not key:
         return None
     try:
@@ -75,6 +75,9 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                         location=it.get("locationName", "") or "",
                         description=strip_tags(it.get("jobDescription", "")),
                         jd_full=False,  # search returns a 452-char snippet; enrich via detail API
+                        remote=detect_remote(it.get("jobTitle", "") or "",
+                                             it.get("locationName", "") or "",
+                                             strip_tags(it.get("jobDescription", ""))),
                         posted_at=_parse_date(it.get("date")),
                         salary_min=it.get("minimumSalary"),
                         salary_max=it.get("maximumSalary"),

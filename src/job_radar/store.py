@@ -140,6 +140,7 @@ class Store:
                 "UPDATE jobs SET last_seen = ?, locations = ? WHERE job_id = ?",
                 [now, json.dumps(locs), job_id],
             )
+            self._upgrade_jd(job_id, job)
             # Off by default; flip to DEBUG to trace why a listing didn't get its
             # own row (e.g. a job that never appears on the dashboard).
             logger.debug(
@@ -162,6 +163,23 @@ class Store:
         )
         return True
 
+    def _upgrade_jd(self, job_id: str, job: Job) -> None:
+        """Merge-time JD upgrade. Content is otherwise first-seen-wins, which let a
+        JD-less source (LinkedIn's guest card) claim a vacancy and permanently shadow
+        the full JD the same posting has on Indeed/an ATS. Take the incoming text when
+        it is materially longer (>25%) than what we stored."""
+        if not job.description:
+            return
+        row = self.con.execute(
+            "SELECT coalesce(description, '') FROM jobs WHERE job_id = ?", [job_id]
+        ).fetchone()
+        if row is None or len(job.description) <= len(row[0]) * 1.25:
+            return
+        self.con.execute(
+            "UPDATE jobs SET description = ?, jd_full = ? WHERE job_id = ?",
+            [job.description, job.jd_full, job_id],
+        )
+
     # --- on-server LLM triage (analyze.py) ------------------------------------
     # Triage scores fit from the stored JD. It writes score + eval_reason only —
     # NEVER the `status` column (that's the workflow lane owned by the dashboard
@@ -171,12 +189,18 @@ class Store:
 
     # --- scan-time JD enrichment (Reed detail API) ------------------------
     def jobs_needing_full_jd(self, limit: int = 500) -> list[dict]:
-        """Jobs whose stored JD is a snippet a detail API can improve — i.e.
-        jd_full = false. Only Reed sets that, so this returns Reed jobs needing a
-        detail fetch. Carries `raw` (the jobId lives there)."""
+        """Jobs whose stored JD a source's detail API can improve: jd_full = false
+        (the source flagged its result a stub), OR no description at all — which also
+        sweeps up rows written before their connector grew a full_description hook, so
+        no backfill migration is needed. Expired (posting closed — its detail page is
+        gone too) and archived (user-dismissed) rows are skipped so a dead backlog
+        can't eat the batch budget. Newest first; caller caps the batch. Carries
+        `raw` (the detail-call ids live there)."""
         rows = self.con.execute(
             """SELECT job_id, source, raw FROM jobs
-               WHERE jd_full IS FALSE ORDER BY first_seen DESC LIMIT ?""",
+               WHERE (jd_full IS FALSE OR coalesce(description, '') = '')
+                 AND status NOT IN ('expired', 'archived')
+               ORDER BY first_seen DESC LIMIT ?""",
             [limit],
         ).fetchall()
         return [
@@ -322,6 +346,87 @@ class Store:
         if n:
             self.con.execute(f"UPDATE jobs SET status = 'expired' WHERE {where}", params)
         return n
+
+    # --- cold history: Parquet archive -----------------------------------------
+    # Long-expired rows are moved OUT of the live DB into month-partitioned Parquet,
+    # so the hot path stays small while every row is kept forever for analytics.
+    # Rows you acted on (applied/rejected/saved) are NEVER archived regardless of
+    # age — they're the outcome labels, and there are only a few dozen.
+    KEEP_LIVE_STATUSES = ("applied", "rejected", "saved")
+
+    def archive_expired(self, archive_dir: str | Path, after_days: int = 30) -> dict:
+        """Move rows expired longer than `after_days` into Parquet, then delete them
+        from `jobs`. Write-verify-delete: the Parquet file is read back and its row
+        count checked against the selection BEFORE anything is deleted, so a failed
+        write can never lose data. Partitioned by first_seen month; re-running is
+        safe (a month's file is rewritten from live + already-archived rows).
+        Returns {"archived": n, "months": [...]} — zeros when there's nothing to do."""
+        archive = Path(archive_dir)
+        cutoff = _now() - timedelta(days=max(1, int(after_days)))
+        keep = ",".join(f"'{s}'" for s in self.KEEP_LIVE_STATUSES)
+        where = (f"status = 'expired' AND last_seen < ? AND status NOT IN ({keep})")
+        months = [r[0] for r in self.con.execute(
+            f"SELECT DISTINCT strftime(first_seen, '%Y-%m') FROM jobs WHERE {where}",
+            [cutoff]).fetchall()]
+        if not months:
+            return {"archived": 0, "months": []}
+
+        archive.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for month in sorted(months):
+            part = archive / f"month={month}" / "part.parquet"
+            part.parent.mkdir(parents=True, exist_ok=True)
+            mwhere = f"{where} AND strftime(first_seen, '%Y-%m') = ?"
+            live_n = self.con.execute(
+                f"SELECT count(*) FROM jobs WHERE {mwhere}", [cutoff, month]).fetchone()[0]
+            # Fold in anything already archived for this month so a rewrite is lossless.
+            prior = 0
+            if part.exists():
+                prior = self.con.execute(
+                    "SELECT count(*) FROM read_parquet(?)", [str(part)]).fetchone()[0]
+                self.con.execute(
+                    f"""CREATE OR REPLACE TEMP TABLE _arch AS
+                        SELECT * FROM jobs WHERE {mwhere}
+                        UNION ALL BY NAME
+                        SELECT * FROM read_parquet('{part}', union_by_name = true)""",
+                    [cutoff, month])
+            else:
+                self.con.execute(
+                    f"CREATE OR REPLACE TEMP TABLE _arch AS SELECT * FROM jobs WHERE {mwhere}",
+                    [cutoff, month])
+            tmp = part.with_suffix(".parquet.tmp")
+            self.con.execute(
+                f"COPY _arch TO '{tmp}' (FORMAT parquet, COMPRESSION zstd)")
+            # VERIFY before deleting anything.
+            written = self.con.execute(
+                "SELECT count(*) FROM read_parquet(?)", [str(tmp)]).fetchone()[0]
+            if written != live_n + prior:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"archive {month}: wrote {written} rows, expected {live_n + prior} — "
+                    "nothing deleted")
+            tmp.replace(part)
+            self.con.execute(f"DELETE FROM jobs WHERE {mwhere}", [cutoff, month])
+            total += live_n
+        self.con.execute("DROP TABLE IF EXISTS _arch")
+        return {"archived": total, "months": sorted(months)}
+
+    def attach_history(self, archive_dir: str | Path) -> bool:
+        """Create the `jobs_all` view = live jobs UNIONed with the Parquet archive,
+        for analytics. `union_by_name` absorbs schema drift, so files written under
+        an older DDL still read back (this repo evolves the schema without
+        migrations). False if there's no archive yet — `jobs_all` then mirrors `jobs`."""
+        files = sorted(Path(archive_dir).glob("month=*/part.parquet"))
+        if not files:
+            self.con.execute("CREATE OR REPLACE VIEW jobs_all AS SELECT * FROM jobs")
+            return False
+        glob = str(Path(archive_dir) / "month=*" / "part.parquet")
+        self.con.execute(
+            f"""CREATE OR REPLACE VIEW jobs_all AS
+                SELECT * FROM jobs
+                UNION ALL BY NAME
+                SELECT * FROM read_parquet('{glob}', union_by_name = true)""")
+        return True
 
     def funnel(self) -> dict[str, int]:
         """Counts for the dashboard funnel: total discovered + per-status."""

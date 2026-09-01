@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 
 from ..schema import Job
+from .base import detect_remote
 
 ID = "ashby"
 BASE = "https://api.ashbyhq.com/posting-api/job-board"
@@ -26,6 +27,9 @@ def fetch(cfg: dict, http: httpx.Client) -> list[Job]:
                     url=url,
                     location=it.get("location", "") or "",
                     description=it.get("descriptionPlain", "") or "",
+                    remote=it.get("isRemote") if it.get("isRemote") is not None else detect_remote(
+                        it.get("title", "") or "", it.get("location", "") or "",
+                        it.get("descriptionPlain", "") or ""),
                     raw=it,
                 )
             )

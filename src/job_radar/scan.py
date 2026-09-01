@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
+
 from . import setup_logging
 from .config import ROOT, load_config
 
@@ -25,6 +27,14 @@ def _load_env() -> None:
         load_dotenv(ROOT / ".env")
     except Exception:
         pass  # dotenv optional; fall back to process env
+
+
+def archive_dir(db_path: str | Path | None, cfg: dict) -> Path:
+    """Where the Parquet history lives — next to the DB (so it's on the same
+    jobs-data volume and survives redeploys) unless `archive_dir` overrides it."""
+    if cfg.get("archive_dir"):
+        return Path(cfg["archive_dir"])
+    return Path(db_path).parent / "archive"
 
 
 def run_scan(
@@ -62,7 +72,7 @@ def run_scan(
 
     http = client()
     totals = {"found": 0, "new": 0, "dupes": 0, "filtered": 0, "errors": 0, "expired": 0,
-              "enriched": 0}
+              "enriched": 0, "archived": 0}
     new_jobs: list[Job] = []  # newly-inserted vacancies → exactly what we notify
     live_sources: list[str] = []  # sources that fetched OK this run (safe to prune)
     started = datetime.now(timezone.utc)
@@ -103,7 +113,7 @@ def run_scan(
         store = Store(db_path) if not dry_run else None
         for job in jobs:
             found += 1
-            if not title_ok(job.title) or not loc_ok(job.location):
+            if not title_ok(job.title) or not loc_ok(job.location, job.remote):
                 filtered += 1
                 continue
             if store is not None:
@@ -130,27 +140,36 @@ def run_scan(
             totals[k] += v
         log(f"  ✓ {sid}: {found} found, {new} new, {dupes} dupes, {filtered} filtered")
 
-    # Enrich truncated JDs: jobs with jd_full=false (Reed snippets) get their full
-    # text from the source's detail API. One-shot per job (the flag flips), so this
-    # only touches newly-inserted snippets. Fetch over HTTP first (no DB lock), then
-    # a quick write burst. Best-effort — a failure just leaves the snippet.
+    # Enrich stub JDs: a source whose search results carry no/partial description
+    # sets jd_full=False and exposes full_description(raw, http, cfg) -> str | None.
+    # One-shot per job (the flag flips on success), so this only touches newly
+    # inserted stubs. Fetch over HTTP first (no DB lock), then a quick write burst.
+    # Best-effort — a failure leaves the stub and it retries next scan.
     if not dry_run and cfg.get("fetch_full_jd", True):
-        from .sources import reed
+        cap = int(cfg.get("full_jd_max", 150))  # detail calls are 1/job — bound the burst
         s = Store(db_path)
-        need = s.jobs_needing_full_jd()
+        need = s.jobs_needing_full_jd(limit=cap)
         s.close()
-        full_jds = [
-            (j["job_id"], reed.full_description(j["raw"], http))
-            for j in need if j["source"] == "reed"
-        ]
-        full_jds = [(jid, txt) for jid, txt in full_jds if txt]
+        full_jds, by_source = [], {}
+        for j in need:
+            fn = getattr(REGISTRY.get(j["source"]), "full_description", None)
+            if fn is None:
+                continue
+            try:
+                txt = fn(j["raw"], http, sources_cfg.get(j["source"], {}))
+            except Exception:
+                txt = None  # one bad detail fetch must not kill the enrichment pass
+            if txt:
+                full_jds.append((j["job_id"], txt))
+                by_source[j["source"]] = by_source.get(j["source"], 0) + 1
         if full_jds:
             s = Store(db_path)
             for jid, txt in full_jds:
                 s.apply_full_jd(jid, txt)
             s.close()
             totals["enriched"] = len(full_jds)
-            log(f"  ↑ enriched {len(full_jds)} Reed JD(s) via detail API")
+            detail = ", ".join(f"{k} {v}" for k, v in sorted(by_source.items()))
+            log(f"  ↑ enriched {len(full_jds)} JD(s) via detail API ({detail})")
 
     http.close()
 
@@ -163,6 +182,22 @@ def run_scan(
         s.close()
         if totals["expired"]:
             log(f"  ⌫ expired {totals['expired']} closed job(s)")
+
+    # Cold history: move long-expired rows out to month-partitioned Parquet so the
+    # live DB stays small while every row is kept for analytics. Write-verify-delete
+    # (see Store.archive_expired) — a failed write deletes nothing. Best-effort: an
+    # archive failure must never fail the scan that already stored new jobs.
+    if not dry_run and cfg.get("archive_after_days"):
+        s = Store(db_path)
+        try:
+            res = s.archive_expired(archive_dir(db_path, cfg), int(cfg["archive_after_days"]))
+            totals["archived"] = res["archived"]
+            if res["archived"]:
+                log(f"  📦 archived {res['archived']} expired job(s) → {', '.join(res['months'])}")
+        except Exception as exc:
+            log(f"  ✗ archive skipped: {exc}")
+        finally:
+            s.close()
 
     log(
         f"scan complete — found {totals['found']}, new {totals['new']}, "
@@ -184,6 +219,29 @@ def run_scan(
     }
 
 
+def compact_db(db_path: str | Path) -> tuple[int, int]:
+    """Reclaim free space by rewriting the DB into a fresh file and swapping it in.
+    DuckDB has no VACUUM and never shrinks in place, so deletes (expiry, archiving)
+    leave the file fragmented — a rewrite is the only way back.
+
+    MANUAL ONLY, never on the scan path: this replaces the DB file, and doing that
+    under a live server risks a reader hitting a half-swapped file. Stop the
+    container, run it, start it. Returns (bytes_before, bytes_after)."""
+    src = Path(db_path)
+    before = src.stat().st_size
+    tmp = src.with_suffix(".compact.duckdb")
+    tmp.unlink(missing_ok=True)
+    con = duckdb.connect(str(tmp))
+    con.execute(f"ATTACH '{src}' AS old (READ_ONLY)")
+    for (table,) in con.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE database_name = 'old'").fetchall():
+        con.execute(f'CREATE TABLE "{table}" AS SELECT * FROM old."{table}"')
+    con.close()
+    after = tmp.stat().st_size
+    tmp.replace(src)
+    return before, after
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="job-scan", description="Deterministic UK job discovery (zero LLM tokens)."
@@ -194,18 +252,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="fetch + filter, write nothing")
     ap.add_argument("--deep", action="store_true",
                     help="full window (ignore recent_days) — full/initial load")
+    ap.add_argument("--compact", action="store_true",
+                    help="rewrite the DB to reclaim free space, then exit (STOP THE "
+                         "SERVER FIRST — this replaces the DB file)")
     args = ap.parse_args(argv)
 
     setup_logging()
     _load_env()
     cfg = load_config(args.config)
+    if args.compact:
+        before, after = compact_db(args.db)
+        print(f"compacted {args.db}: {before/1e6:.2f} MB → {after/1e6:.2f} MB")
+        return 0
     result = run_scan(cfg, args.db, only_source=args.source, dry_run=args.dry_run, deep=args.deep)
 
     t = result["totals"]
     bar = "━" * 45
     date = datetime.now(timezone.utc).date().isoformat()
     print(f"\n{bar}\nJob Scan — {date}\n{bar}")
-    for k in ("found", "new", "dupes", "filtered", "errors", "expired", "enriched"):
+    for k in ("found", "new", "dupes", "filtered", "errors", "expired", "enriched",
+              "archived"):
         print(f"{k.capitalize()+':':9} {t.get(k, 0)}")
     if result["new_jobs"]:
         print("\nNew matches:")

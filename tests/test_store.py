@@ -162,3 +162,84 @@ def test_relisted_within_window_merges_in_place(tmp_path):
     # still live (seen <24h ago) → re-sighting merges, no new row, no re-notify
     assert s.upsert(job, 24) is False
     assert len(s.list_jobs()) == 1
+
+
+def test_merge_upgrades_a_stub_jd(tmp_path):
+    """A JD-less source must not permanently shadow the same vacancy's real JD."""
+    s = _store(tmp_path)
+    stub = Job(source="linkedin", company="Acme", title="Data Engineer",
+               url="https://li/1", location="Edinburgh", description="", jd_full=False)
+    assert s.upsert(stub) is True
+    full = Job(source="indeed", company="Acme", title="Data Engineer",
+               url="https://in/1", location="Edinburgh", description="PySpark " * 200)
+    assert s.upsert(full) is False  # same vacancy_key → merged, not a new row
+    desc, jd_full = s.con.execute("SELECT description, jd_full FROM jobs").fetchone()
+    assert "PySpark" in desc and jd_full is True
+    # a shorter JD arriving later must NOT clobber the good one
+    s.upsert(Job(source="adzuna", company="Acme", title="Data Engineer",
+                 url="https://ad/1", location="Edinburgh", description="tiny snippet"))
+    assert len(s.con.execute("SELECT description FROM jobs").fetchone()[0]) > 1000
+    s.close()
+
+
+def test_jobs_needing_full_jd_includes_legacy_empty_rows(tmp_path):
+    """Rows written before their connector grew a hook have jd_full=true + no JD."""
+    s = _store(tmp_path)
+    s.upsert(Job(source="linkedin", company="A", title="DE", url="https://li/9",
+                 location="Glasgow", description="", jd_full=True))
+    assert len(s.jobs_needing_full_jd()) == 1
+    s.close()
+
+
+def _expired(store: Store, url: str, *, days: int, status: str = "expired") -> None:
+    old = datetime.now(timezone.utc) - timedelta(days=days)
+    store.con.execute(
+        "UPDATE jobs SET status = ?, last_seen = ?, first_seen = ? WHERE url = ?",
+        [status, old, old, url])
+
+
+def test_archive_moves_old_expired_rows_to_parquet(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(_job("https://x/old", title="Old Engineer"))
+    s.upsert(_job("https://x/recent", title="Recent Engineer"))
+    s.upsert(_job("https://x/applied", title="Applied Engineer"))
+    _expired(s, "https://x/old", days=60)
+    _expired(s, "https://x/recent", days=5)
+    _expired(s, "https://x/applied", days=90, status="applied")
+
+    arch = tmp_path / "archive"
+    res = s.archive_expired(arch, after_days=30)
+    assert res["archived"] == 1                                   # only the 60-day row
+    live = {r[0] for r in s.con.execute("SELECT url FROM jobs").fetchall()}
+    assert live == {"https://x/recent", "https://x/applied"}      # applied never archived
+    assert list(arch.glob("month=*/part.parquet"))                # written, partitioned
+
+    s.attach_history(arch)                                        # history readable again
+    assert s.con.execute("SELECT count(*) FROM jobs_all").fetchone()[0] == 3
+    assert s.con.execute(
+        "SELECT title FROM jobs_all WHERE url = 'https://x/old'").fetchone()[0] == "Old Engineer"
+    s.close()
+
+
+def test_archive_is_idempotent_and_lossless(tmp_path):
+    s = _store(tmp_path)
+    for i in range(3):
+        s.upsert(_job(f"https://x/{i}", title=f"Engineer {i}"))
+        _expired(s, f"https://x/{i}", days=60)
+    arch = tmp_path / "archive"
+    assert s.archive_expired(arch, after_days=30)["archived"] == 3
+    assert s.archive_expired(arch, after_days=30)["archived"] == 0   # nothing left
+    s.upsert(_job("https://x/late", title="Late Engineer"))          # a 4th, same month
+    _expired(s, "https://x/late", days=60)
+    s.archive_expired(arch, after_days=30)
+    s.attach_history(arch)
+    assert s.con.execute("SELECT count(*) FROM jobs_all").fetchone()[0] == 4  # none lost
+    s.close()
+
+
+def test_attach_history_without_archive_mirrors_jobs(tmp_path):
+    s = _store(tmp_path)
+    s.upsert(_job("https://x/1"))
+    assert s.attach_history(tmp_path / "nope") is False
+    assert s.con.execute("SELECT count(*) FROM jobs_all").fetchone()[0] == 1
+    s.close()
